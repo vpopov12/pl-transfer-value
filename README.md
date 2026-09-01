@@ -20,3 +20,7 @@ and tree-based (XGBoost) models.
   measurable output, then checks whether that gap correlates with big-six
   club affiliation, nationality, or position (a data-grounded look at the
   "eye test" idea from football media, not a direct measurement of it).
+- `notebooks/04_fan_guide.ipynb` — plain-language tour of the headline
+  findings from the other three notebooks (no stats jargon), for a reader
+  who just wants the takeaways: prime age, what drives value, players
+  projected to rise, and the big-six value premium.
