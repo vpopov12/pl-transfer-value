@@ -24,7 +24,7 @@ TRAILING_WINDOW_DAYS = 365
 # would match almost nothing.
 HORIZON_TOLERANCE_DAYS = {3: 40, 6: 70, 9: 110, 12: 150}
 
-CUM_COLS = ["cum_goals", "cum_assists", "cum_minutes", "cum_apps"]
+CUM_COLS = ["cum_goals", "cum_assists", "cum_minutes", "cum_apps", "cum_club_position"]
 
 
 def load_valuations(data_dir: Path) -> pd.DataFrame:
@@ -41,20 +41,51 @@ def load_valuations(data_dir: Path) -> pd.DataFrame:
     )
 
 
+def load_pl_games(data_dir: Path) -> pd.DataFrame:
+    games = pd.read_csv(data_dir / "games.csv")
+    games = games[games["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID]
+    return games[
+        ["game_id", "home_club_id", "away_club_id", "home_club_position", "away_club_position"]
+    ]
+
+
 def load_pl_appearances(data_dir: Path) -> pd.DataFrame:
+    """PL appearances, each tagged with the player's club's league position in that match
+    (a proxy for team strength/context around the player's performance)."""
     appearances = pd.read_csv(data_dir / "appearances.csv")
     appearances["date"] = pd.to_datetime(appearances["date"], errors="coerce")
     appearances = appearances[appearances["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID]
+
+    games = load_pl_games(data_dir)
+    appearances = appearances.merge(games, on="game_id", how="left")
+    appearances["club_position"] = np.where(
+        appearances["player_club_id"] == appearances["home_club_id"],
+        appearances["home_club_position"],
+        appearances["away_club_position"],
+    )
     return appearances.sort_values("date").reset_index(drop=True)
 
 
+def load_transfers(data_dir: Path) -> pd.DataFrame:
+    """Full transfer history (any league), for time-since-last-move / fee features."""
+    transfers = pd.read_csv(data_dir / "transfers.csv", low_memory=False)
+    transfers["transfer_date"] = pd.to_datetime(transfers["transfer_date"], errors="coerce")
+    return (
+        transfers[["player_id", "transfer_date", "transfer_fee"]]
+        .dropna(subset=["player_id", "transfer_date"])
+        .sort_values("transfer_date")
+        .reset_index(drop=True)
+    )
+
+
 def _career_cumulative_stats(appearances: pd.DataFrame) -> pd.DataFrame:
-    """Per player_id + date, career-to-date cumulative goals/assists/minutes/apps."""
+    """Per player_id + date, career-to-date cumulative goals/assists/minutes/apps/club position."""
     cum = appearances.sort_values(["player_id", "date"]).copy()
     cum["cum_goals"] = cum.groupby("player_id")["goals"].cumsum()
     cum["cum_assists"] = cum.groupby("player_id")["assists"].cumsum()
     cum["cum_minutes"] = cum.groupby("player_id")["minutes_played"].cumsum()
     cum["cum_apps"] = cum.groupby("player_id").cumcount() + 1
+    cum["cum_club_position"] = cum.groupby("player_id")["club_position"].cumsum()
     daily = cum.groupby(["player_id", "date"], as_index=False)[CUM_COLS].last()
     return daily.sort_values("date").reset_index(drop=True)
 
@@ -93,6 +124,44 @@ def add_trailing_form(snapshots: pd.DataFrame, appearances: pd.DataFrame) -> pd.
     enough_minutes = snapshots["trailing_minutes"] >= MIN_MINUTES_FOR_RATE
     snapshots["trailing_goals_per90"] = np.where(enough_minutes, snapshots["trailing_goals"] / nineties, 0.0)
     snapshots["trailing_assists_per90"] = np.where(enough_minutes, snapshots["trailing_assists"] / nineties, 0.0)
+
+    # Average league position of the player's club over the trailing window (1 = top of table),
+    # a proxy for the strength of the team context the player's performance happened in.
+    # With no trailing PL appearances, default to a neutral mid-table position (20-team league).
+    NEUTRAL_LEAGUE_POSITION = 10.5
+    has_trailing_apps = snapshots["trailing_appearances"] > 0
+    snapshots["trailing_avg_club_position"] = np.where(
+        has_trailing_apps,
+        trailing["cum_club_position"] / snapshots["trailing_appearances"],
+        NEUTRAL_LEAGUE_POSITION,
+    )
+    return snapshots
+
+
+def add_transfer_history(snapshots: pd.DataFrame, transfers: pd.DataFrame) -> pd.DataFrame:
+    """Add time-since-last-transfer, prior-transfer count, and last transfer fee, all as of
+    the snapshot date (genuinely dated, unlike players.csv's current-only contract fields)."""
+    snapshots = snapshots.copy()
+    history = transfers.sort_values(["player_id", "transfer_date"]).copy()
+    history["transfer_seq"] = history.groupby("player_id").cumcount() + 1
+    history = history.sort_values("transfer_date")
+
+    ordered = snapshots[["player_id", "snapshot_date"]].sort_values("snapshot_date").reset_index()
+    merged = pd.merge_asof(
+        ordered,
+        history,
+        left_on="snapshot_date",
+        right_on="transfer_date",
+        by="player_id",
+        direction="backward",
+    )
+    merged = merged.set_index("index").reindex(snapshots.index)
+
+    months_since = (snapshots["snapshot_date"] - merged["transfer_date"]).dt.days / 30.44
+    snapshots["has_transfer_history"] = merged["transfer_date"].notna().astype(int)
+    snapshots["months_since_last_transfer"] = months_since.fillna(0.0)
+    snapshots["num_prior_transfers"] = merged["transfer_seq"].fillna(0)
+    snapshots["last_transfer_fee_eur"] = merged["transfer_fee"].fillna(0.0)
     return snapshots
 
 
@@ -131,11 +200,13 @@ def build_snapshot_panel() -> pd.DataFrame:
     players = load_players(data_dir)
     valuations = load_valuations(data_dir)
     appearances = load_pl_appearances(data_dir)
+    transfers = load_transfers(data_dir)
 
     snapshots = valuations.rename(
         columns={"date": "snapshot_date", "market_value_in_eur": "current_value_eur"}
     )
     snapshots = add_trailing_form(snapshots, appearances)
+    snapshots = add_transfer_history(snapshots, transfers)
     snapshots = add_horizon_targets(snapshots, valuations)
 
     snapshots = snapshots.merge(

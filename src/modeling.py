@@ -21,6 +21,11 @@ NUMERIC_FEATURES = [
     "trailing_assists_per90",
     "trailing_minutes",
     "trailing_appearances",
+    "trailing_avg_club_position",
+    "has_transfer_history",
+    "months_since_last_transfer",
+    "num_prior_transfers",
+    "log_last_transfer_fee_eur",
 ]
 CATEGORICAL_FEATURES = ["sub_position", "foot"]
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
@@ -46,6 +51,7 @@ def prepare_features(panel: pd.DataFrame) -> pd.DataFrame:
     df = panel.copy()
     df["log_current_value_eur"] = np.log10(df["current_value_eur"])
     df["age_sq"] = df["age"] ** 2
+    df["log_last_transfer_fee_eur"] = np.log1p(df["last_transfer_fee_eur"])
     df["foot"] = df["foot"].fillna("unknown")
     df["sub_position"] = df["sub_position"].fillna("unknown")
     return df
