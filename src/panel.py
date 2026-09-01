@@ -34,8 +34,8 @@ def load_valuations(data_dir: Path) -> pd.DataFrame:
         valuations["player_club_domestic_competition_id"] == PREMIER_LEAGUE_COMPETITION_ID
     ]
     return (
-        valuations[["player_id", "date", "market_value_in_eur"]]
-        .dropna()
+        valuations[["player_id", "date", "market_value_in_eur", "current_club_name"]]
+        .dropna(subset=["player_id", "date", "market_value_in_eur"])
         .sort_values("date")
         .reset_index(drop=True)
     )
@@ -211,7 +211,16 @@ def build_snapshot_panel() -> pd.DataFrame:
 
     snapshots = snapshots.merge(
         players[
-            ["player_id", "name", "date_of_birth", "position", "sub_position", "foot", "height_in_cm"]
+            [
+                "player_id",
+                "name",
+                "date_of_birth",
+                "position",
+                "sub_position",
+                "foot",
+                "height_in_cm",
+                "country_of_citizenship",
+            ]
         ],
         on="player_id",
         how="left",
