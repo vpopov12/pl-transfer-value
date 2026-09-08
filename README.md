@@ -74,6 +74,14 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   features lift 12-month Spearman from ~0.56 to ~0.59 (and 0.58 to 0.66 at 3
   months), while cards and start-share add nothing.
 
+- `notebooks/06_why_it_works.ipynb` — asks *why* the growth model works and
+  when it doesn't, all walk-forward (`src/analysis.py`): whether the signal is
+  really transfer anticipation (it isn't: stayers are ranked better than
+  movers), market-wide drift vs. player-specific error, whether the
+  "eye-test premium" gets corrected, survivorship of players who leave the
+  league, momentum vs. mean reversion by value tier, a two-stage model for the
+  zero-change spike, and relegation as an unseen shock.
+
 ## Tests
 
 Unit tests cover the pure transformation logic in `src/panel.py` and
