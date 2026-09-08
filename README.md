@@ -51,13 +51,15 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   findings from the other three notebooks (no stats jargon), for a reader
   who just wants the takeaways: prime age, what drives value, players
   projected to rise, and the big-six value premium.
-- `notebooks/05_backtest.ipynb` — a genuine walk-forward backtest: trains
-  on data up to June 2025 only, predicts 12 months forward, and checks
-  those predictions against real outcomes that have since resolved. Finds
-  a real but modest signal (predicted vs. actual correlation ~0.4) and a
-  meaningfully higher error than the same-period test split notebook 02
-  reported — the model tends to call the right direction but undersizes
-  genuine breakouts.
+- `notebooks/05_backtest.ipynb` — a walk-forward backtest repeated at every
+  six months from mid-2017 to early 2025 (`walk_forward_backtest` in
+  `src/modeling.py`): at each cutoff the model trains only on outcomes that had
+  fully resolved by then, predicts 12 months forward, and is scored against what
+  really happened. XGBoost ranks players by future growth with a Spearman
+  correlation of ~0.5 at every cutoff and horizon, and the players it ranks in
+  its top tenth rose several times more than average in every window. It is a
+  reliable screen for *who* is likely to rise, not a precise forecast of *how
+  much*: it consistently undersizes genuine breakouts.
 
 ## Tests
 
