@@ -24,3 +24,14 @@ and tree-based (XGBoost) models.
   findings from the other three notebooks (no stats jargon), for a reader
   who just wants the takeaways: prime age, what drives value, players
   projected to rise, and the big-six value premium.
+
+## Tests
+
+Unit tests cover the pure transformation logic in `src/panel.py` and
+`src/modeling.py` (trailing-window math, horizon-target matching, feature
+prep) against small synthetic DataFrames — they don't download the Kaggle
+dataset, so they run in under a couple of seconds.
+
+```
+uv run pytest -x --tb=short
+```
