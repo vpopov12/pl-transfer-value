@@ -24,6 +24,13 @@ and tree-based (XGBoost) models.
   findings from the other three notebooks (no stats jargon), for a reader
   who just wants the takeaways: prime age, what drives value, players
   projected to rise, and the big-six value premium.
+- `notebooks/05_backtest.ipynb` — a genuine walk-forward backtest: trains
+  on data up to June 2025 only, predicts 12 months forward, and checks
+  those predictions against real outcomes that have since resolved. Finds
+  a real but modest signal (predicted vs. actual correlation ~0.4) and a
+  meaningfully higher error than the same-period test split notebook 02
+  reported — the model tends to call the right direction but undersizes
+  genuine breakouts.
 
 ## Tests
 
