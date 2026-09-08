@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from src.modeling import (
+    FEATURE_COLUMNS,
     latest_snapshot_per_player,
     predict_value_growth,
     prepare_features,
@@ -218,9 +219,53 @@ def test_summarize_backtest_aggregates_across_cutoffs() -> None:
             "pearson": [0.5, 0.7, 0.6, 0.8],
             "spearman": [0.4, 0.6, 0.5, 0.7],
             "direction_accuracy": [0.6, 0.7, 0.65, 0.75],
+            "calibration_slope": [0.9, 1.1, 0.8, 1.2],
         }
     )
     summary = summarize_backtest(metrics)
     assert summary.index.tolist() == ["ridge", "linear"]  # sorted by mean spearman, best first
     assert summary.loc["linear", ("mae", "mean")] == pytest.approx(0.3)
     assert summary.loc["ridge", "n_cutoffs"] == 2
+
+
+def test_fit_model_with_log_ratio_target_predicts_on_pct_scale() -> None:
+    from src.modeling import fit_model, modelable_rows
+
+    panel = _synthetic_panel(n_players=30, n_dates=10)
+    train = modelable_rows(panel, months=12)
+    pct_model = fit_model(train, "linear", months=12, target_transform="pct")
+    log_model = fit_model(train, "linear", months=12, target_transform="log_ratio")
+
+    pct_pred = pct_model.predict(train[FEATURE_COLUMNS])
+    log_pred = log_model.predict(train[FEATURE_COLUMNS])
+    # Both are on the same (% change) scale: the target here is a small linear signal with
+    # noise, so the two fits should agree closely and neither should return log values.
+    assert np.corrcoef(pct_pred, log_pred)[0, 1] > 0.99
+    assert abs(pct_pred.mean() - log_pred.mean()) < 0.05
+    assert log_pred.min() > -1.0  # expm1 of anything is > -1, i.e. a value can't drop below zero
+
+
+def test_fit_quantile_models_orders_quantiles_and_reports_intervals() -> None:
+    from src.modeling import fit_quantile_models, modelable_rows, predict_value_growth_interval
+
+    panel = _synthetic_panel(n_players=40, n_dates=12)
+    train = modelable_rows(panel, months=12)
+    models = fit_quantile_models(train, months=12, quantiles=(0.1, 0.5, 0.9))
+    intervals = predict_value_growth_interval(models, train.head(50))
+
+    assert {"pct_q10", "pct_q50", "pct_q90", "value_eur_q10", "value_eur_q90"} <= set(intervals.columns)
+    # Quantile fits aren't guaranteed monotone row by row, but should be on average.
+    assert intervals["pct_q10"].mean() < intervals["pct_q50"].mean() < intervals["pct_q90"].mean()
+    assert (intervals["value_eur_q10"] == intervals["current_value_eur"] * (1 + intervals["pct_q10"])).all()
+
+
+def test_walk_forward_interval_backtest_reports_coverage_per_cutoff() -> None:
+    from src.modeling import walk_forward_interval_backtest
+
+    panel = _synthetic_panel()
+    cutoffs = [pd.Timestamp("2020-06-01"), pd.Timestamp("2021-06-01")]
+    coverage = walk_forward_interval_backtest(panel, months=12, cutoffs=cutoffs)
+
+    assert coverage["cutoff"].tolist() == cutoffs
+    assert ((coverage["coverage"] + coverage["below_low"] + coverage["above_high"]).round(6) == 1.0).all()
+    assert (coverage["median_width"] > 0).all()

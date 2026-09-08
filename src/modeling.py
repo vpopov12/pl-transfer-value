@@ -10,7 +10,7 @@ from collections.abc import Iterable, Sequence
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
-from sklearn.compose import ColumnTransformer
+from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
@@ -36,22 +36,41 @@ NUMERIC_FEATURES = [
 CATEGORICAL_FEATURES = ["sub_position", "foot"]
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
+XGB_DEFAULTS = dict(
+    n_estimators=300,
+    max_depth=4,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    random_state=42,
+)
+
 MODEL_FACTORIES = {
     "linear": lambda: LinearRegression(),
     "ridge": lambda: Ridge(alpha=1.0),
     "lasso": lambda: Lasso(alpha=0.01),
-    "xgboost": lambda: XGBRegressor(
-        n_estimators=300,
-        max_depth=4,
-        learning_rate=0.05,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=42,
-    ),
+    "xgboost": lambda: XGBRegressor(**XGB_DEFAULTS),
+    # Pseudo-Huber loss: squared error near zero, absolute error in the tails, so a
+    # handful of extreme breakouts pull the fit less than under plain squared error.
+    "xgboost_huber": lambda: XGBRegressor(objective="reg:pseudohubererror", huber_slope=1.0, **XGB_DEFAULTS),
 }
 
 # Cap training/eval target so a few breakout outliers don't dominate squared-error fits.
 TARGET_CLIP = (-0.95, 5.0)
+
+# How the % change target is represented inside the model. Predictions are always
+# returned on the % change scale regardless.
+#   pct:       fit the raw fraction (0.5 == +50%).
+#   log_ratio: fit log(future / current) == log1p(pct). Symmetric in up/down moves
+#              and compresses breakouts, so the loss isn't dominated by them and
+#              no clip is needed to keep squared error stable.
+TARGET_TRANSFORMS: dict[str, tuple] = {
+    "pct": (None, None),
+    "log_ratio": (np.log1p, np.expm1),
+}
+# log_ratio wins on every walk-forward metric (lower MAE, higher Spearman, calibration
+# slope ~1 instead of ~0.7), see notebook 05, so it is the default everywhere.
+DEFAULT_TARGET_TRANSFORM = "log_ratio"
 
 
 def target_column(months: int) -> str:
@@ -77,12 +96,62 @@ def build_preprocessor() -> ColumnTransformer:
     )
 
 
-def fit_model(train: pd.DataFrame, model_name: str, months: int) -> Pipeline:
+def _clip_target(y: pd.Series, clip: tuple[float, float] | None) -> pd.Series:
+    return y if clip is None else y.clip(*clip)
+
+
+def build_pipeline(model, target_transform: str = DEFAULT_TARGET_TRANSFORM):
+    """Preprocessing + model, optionally fitting on a transformed target.
+
+    With a transform, `.predict()` still returns values on the % change scale."""
+    pipeline = Pipeline([("preprocess", build_preprocessor()), ("model", model)])
+    func, inverse = TARGET_TRANSFORMS[target_transform]
+    if func is None:
+        return pipeline
+    return TransformedTargetRegressor(regressor=pipeline, func=func, inverse_func=inverse)
+
+
+def fit_model(
+    train: pd.DataFrame,
+    model_name: str,
+    months: int,
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
+    clip: tuple[float, float] | None = TARGET_CLIP,
+):
     """Fit one named model on already-prepared training rows for the given horizon."""
-    pipeline = Pipeline([("preprocess", build_preprocessor()), ("model", MODEL_FACTORIES[model_name]())])
-    y_train = train[target_column(months)].clip(*TARGET_CLIP)
+    pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform)
+    y_train = _clip_target(train[target_column(months)], clip)
     pipeline.fit(train[FEATURE_COLUMNS], y_train)
     return pipeline
+
+
+def fit_quantile_models(
+    train: pd.DataFrame,
+    months: int,
+    quantiles: Sequence[float] = (0.1, 0.5, 0.9),
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
+    clip: tuple[float, float] | None = TARGET_CLIP,
+) -> dict[float, object]:
+    """One XGBoost quantile regressor per requested quantile, for prediction intervals."""
+    y_train = _clip_target(train[target_column(months)], clip)
+    models = {}
+    for q in quantiles:
+        regressor = XGBRegressor(objective="reg:quantileerror", quantile_alpha=q, **XGB_DEFAULTS)
+        pipeline = build_pipeline(regressor, target_transform)
+        pipeline.fit(train[FEATURE_COLUMNS], y_train)
+        models[q] = pipeline
+    return models
+
+
+def predict_value_growth_interval(models: dict[float, object], current_players: pd.DataFrame) -> pd.DataFrame:
+    """Predicted % change at each fitted quantile, plus the implied value range in EUR."""
+    df = prepare_features(current_players).dropna(subset=FEATURE_COLUMNS)
+    out = df[["player_id", "name", "sub_position", "age", "current_value_eur"]].copy()
+    for q, pipeline in models.items():
+        out[f"pct_q{int(round(q * 100)):02d}"] = pipeline.predict(df[FEATURE_COLUMNS])
+    for col in [c for c in out.columns if c.startswith("pct_q")]:
+        out[col.replace("pct_", "value_eur_")] = out["current_value_eur"] * (1 + out[col])
+    return out
 
 
 def modelable_rows(panel: pd.DataFrame, months: int) -> pd.DataFrame:
@@ -189,19 +258,27 @@ def default_backtest_cutoffs(
 def _backtest_metrics(predicted: pd.Series, actual: pd.Series) -> dict[str, float]:
     """Accuracy of point predictions of % change against realised % change.
 
-    `actual` is clipped to TARGET_CLIP for the error metrics so a couple of extreme
-    breakouts don't swamp the MAE; the rank metrics are unaffected either way."""
+    `actual` is clipped to TARGET_CLIP for the error and calibration metrics so a couple
+    of extreme breakouts don't swamp them; the rank metrics are unaffected either way.
+
+    `calibration_slope` is the OLS slope of actual on predicted: 1.0 means predicted
+    sizes are right on average, > 1 means the model systematically undersizes moves,
+    < 1 means it oversizes them."""
     actual_clipped = actual.clip(*TARGET_CLIP)
     errors = predicted - actual_clipped
     nonzero = actual != 0
     top_decile = predicted >= predicted.quantile(0.9)
+    pred_var = predicted.var()
+    slope = float(predicted.cov(actual_clipped) / pred_var) if pred_var > 0 else float("nan")
     return {
         "mae": float(errors.abs().mean()),
         "rmse": float(np.sqrt((errors**2).mean())),
         "pearson": float(predicted.corr(actual_clipped)),
         "spearman": float(spearmanr(predicted, actual).statistic),
         "direction_accuracy": float((np.sign(predicted[nonzero]) == np.sign(actual[nonzero])).mean()),
+        "calibration_slope": slope,
         "mean_actual_top_decile": float(actual[top_decile].mean()),
+        "mean_predicted_top_decile": float(predicted[top_decile].mean()),
         "mean_actual_all": float(actual.mean()),
     }
 
@@ -212,6 +289,8 @@ def walk_forward_backtest(
     cutoffs: Iterable[pd.Timestamp] | None = None,
     model_names: Sequence[str] = ("linear", "ridge", "lasso", "xgboost"),
     max_age_days: int = 365,
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
+    clip: tuple[float, float] | None = TARGET_CLIP,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Repeat "train up to T, predict T + months, score against what actually happened"
     for several cutoff dates T and every named model.
@@ -240,7 +319,7 @@ def walk_forward_backtest(
         if train.empty or eval_rows.empty:
             continue
         for name in model_names:
-            pipeline = fit_model(train, name, months)
+            pipeline = fit_model(train, name, months, target_transform, clip)
             preds = predict_value_growth(pipeline, eval_rows)
             preds = preds.merge(
                 eval_rows[["player_id", "snapshot_date", target_col]].rename(
@@ -269,7 +348,51 @@ def walk_forward_backtest(
 
 def summarize_backtest(metrics: pd.DataFrame) -> pd.DataFrame:
     """Mean and spread of each score across cutoffs, per model."""
-    score_cols = ["mae", "rmse", "pearson", "spearman", "direction_accuracy"]
+    score_cols = ["mae", "rmse", "pearson", "spearman", "direction_accuracy", "calibration_slope"]
     summary = metrics.groupby("model")[score_cols].agg(["mean", "std", "min", "max"])
     summary["n_cutoffs"] = metrics.groupby("model").size()
     return summary.sort_values(("spearman", "mean"), ascending=False)
+
+
+def walk_forward_interval_backtest(
+    panel: pd.DataFrame,
+    months: int,
+    cutoffs: Iterable[pd.Timestamp] | None = None,
+    quantiles: Sequence[float] = (0.1, 0.9),
+    max_age_days: int = 365,
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
+) -> pd.DataFrame:
+    """Walk-forward check of quantile prediction intervals: at each cutoff, what fraction of
+    realised outcomes fell inside the [low, high] quantile band, and how wide was it?
+
+    A well-calibrated 10-90 band should cover about 80% of outcomes."""
+    usable = modelable_rows(panel, months)
+    if cutoffs is None:
+        cutoffs = default_backtest_cutoffs(panel, months)
+    low_q, high_q = min(quantiles), max(quantiles)
+    target_col = target_column(months)
+
+    rows: list[dict[str, object]] = []
+    for cutoff in cutoffs:
+        cutoff = pd.Timestamp(cutoff)
+        train = strict_training_panel(usable, cutoff, months)
+        eval_rows = latest_snapshot_per_player(usable[usable["snapshot_date"] <= cutoff], max_age_days)
+        if train.empty or eval_rows.empty:
+            continue
+        models = fit_quantile_models(train, months, (low_q, high_q), target_transform)
+        preds = predict_value_growth_interval(models, eval_rows)
+        preds = preds.merge(eval_rows[["player_id", target_col]], on="player_id", how="left")
+        low = preds[f"pct_q{int(round(low_q * 100)):02d}"]
+        high = preds[f"pct_q{int(round(high_q * 100)):02d}"]
+        actual = preds[target_col]
+        rows.append(
+            {
+                "cutoff": cutoff,
+                "n_eval": len(preds),
+                "coverage": float(((actual >= low) & (actual <= high)).mean()),
+                "below_low": float((actual < low).mean()),
+                "above_high": float((actual > high).mean()),
+                "median_width": float((high - low).median()),
+            }
+        )
+    return pd.DataFrame(rows)

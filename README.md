@@ -55,11 +55,15 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   six months from mid-2017 to early 2025 (`walk_forward_backtest` in
   `src/modeling.py`): at each cutoff the model trains only on outcomes that had
   fully resolved by then, predicts 12 months forward, and is scored against what
-  really happened. XGBoost ranks players by future growth with a Spearman
-  correlation of ~0.5 at every cutoff and horizon, and the players it ranks in
-  its top tenth rose several times more than average in every window. It is a
-  reliable screen for *who* is likely to rise, not a precise forecast of *how
-  much*: it consistently undersizes genuine breakouts.
+  really happened. Every model ranks players by future growth with a Spearman
+  correlation of ~0.55 at every cutoff and horizon, and the players ranked in
+  the top tenth rose several times more than average in every window. The
+  notebook also tests fixes for the model's tendency to undersize big moves:
+  fitting `log(future / current)` instead of raw % change fixes calibration
+  (slope 0.97 vs 0.72) and is now the project default, while Huber loss and
+  looser clipping don't help. Quantile-regression 10-90% intervals cover ~75%
+  of outcomes walk-forward, with the shortfall concentrated in the pandemic
+  markdown of 2020.
 
 ## Tests
 
