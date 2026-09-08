@@ -24,7 +24,7 @@ from src.data_loader import (
 
 # Bump whenever the panel's columns or their semantics change, so stale parquet
 # caches built from an older feature set are ignored rather than silently reused.
-PANEL_SCHEMA_VERSION = 1
+PANEL_SCHEMA_VERSION = 2
 PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
 
 HORIZONS_MONTHS = (3, 6, 9, 12)
@@ -34,7 +34,16 @@ TRAILING_WINDOW_DAYS = 365
 # would match almost nothing.
 HORIZON_TOLERANCE_DAYS = {3: 40, 6: 70, 9: 110, 12: 150}
 
-CUM_COLS = ["cum_goals", "cum_assists", "cum_minutes", "cum_apps", "cum_club_position"]
+CUM_COLS = [
+    "cum_goals",
+    "cum_assists",
+    "cum_minutes",
+    "cum_apps",
+    "cum_club_position",
+    "cum_yellow_cards",
+    "cum_red_cards",
+    "cum_starts",
+]
 
 
 def load_valuations(data_dir: Path) -> pd.DataFrame:
@@ -74,6 +83,17 @@ def load_pl_appearances(data_dir: Path) -> pd.DataFrame:
     return appearances.sort_values("date").reset_index(drop=True)
 
 
+def load_pl_starts(data_dir: Path) -> pd.DataFrame:
+    """One row per (player_id, game_id) PL start, from the lineups file (starting XI only)."""
+    lineups = pd.read_csv(
+        data_dir / "game_lineups.csv", usecols=["game_id", "player_id", "type"], low_memory=False
+    )
+    lineups = lineups[lineups["type"] == "starting_lineup"]
+    pl_games = load_pl_games(data_dir)[["game_id"]]
+    starts = lineups.merge(pl_games, on="game_id", how="inner")[["game_id", "player_id"]]
+    return starts.drop_duplicates().assign(started=1)
+
+
 def load_transfers(data_dir: Path) -> pd.DataFrame:
     """Full transfer history (any league), for time-since-last-move / fee features."""
     transfers = pd.read_csv(data_dir / "transfers.csv", low_memory=False)
@@ -94,6 +114,13 @@ def _career_cumulative_stats(appearances: pd.DataFrame) -> pd.DataFrame:
     cum["cum_minutes"] = cum.groupby("player_id")["minutes_played"].cumsum()
     cum["cum_apps"] = cum.groupby("player_id").cumcount() + 1
     cum["cum_club_position"] = cum.groupby("player_id")["club_position"].cumsum()
+    for col, cum_col in [
+        ("yellow_cards", "cum_yellow_cards"),
+        ("red_cards", "cum_red_cards"),
+        ("started", "cum_starts"),
+    ]:
+        values = cum[col] if col in cum else pd.Series(0, index=cum.index)
+        cum[cum_col] = values.fillna(0).groupby(cum["player_id"]).cumsum()
     daily = cum.groupby(["player_id", "date"], as_index=False)[CUM_COLS].last()
     return daily.sort_values("date").reset_index(drop=True)
 
@@ -145,6 +172,68 @@ def add_trailing_form(snapshots: pd.DataFrame, appearances: pd.DataFrame) -> pd.
         trailing["cum_club_position"] / snapshots["trailing_appearances"],
         NEUTRAL_LEAGUE_POSITION,
     )
+
+    # Discipline and role: cards per 90 (same minutes floor as the goal rates), and the share
+    # of trailing appearances that were starts (0 when there were no appearances).
+    snapshots["trailing_yellow_cards"] = trailing["cum_yellow_cards"]
+    snapshots["trailing_red_cards"] = trailing["cum_red_cards"]
+    snapshots["trailing_cards_per90"] = np.where(
+        enough_minutes,
+        (snapshots["trailing_yellow_cards"] + 3 * snapshots["trailing_red_cards"]) / nineties,
+        0.0,
+    )
+    snapshots["trailing_starts"] = trailing["cum_starts"]
+    snapshots["trailing_start_share"] = np.where(
+        has_trailing_apps,
+        (snapshots["trailing_starts"] / snapshots["trailing_appearances"]).clip(upper=1.0),
+        0.0,
+    )
+    return snapshots
+
+
+def add_value_trend(snapshots: pd.DataFrame) -> pd.DataFrame:
+    """Add features describing the player's own valuation history up to each snapshot:
+    the last change in value, how long ago it was, and where the current value sits
+    relative to the player's career peak so far. All strictly backward-looking."""
+    snapshots = snapshots.copy()
+    ordered = snapshots.sort_values(["player_id", "snapshot_date"])
+    by_player = ordered.groupby("player_id")
+
+    prev_value = by_player["current_value_eur"].shift(1)
+    prev_date = by_player["snapshot_date"].shift(1)
+    peak_to_date = by_player["current_value_eur"].cummax()
+
+    ordered_features = pd.DataFrame(
+        {
+            "has_prev_valuation": prev_value.notna().astype(int),
+            "prev_value_change_pct": (ordered["current_value_eur"] / prev_value - 1).fillna(0.0),
+            "months_since_prev_valuation": ((ordered["snapshot_date"] - prev_date).dt.days / 30.44).fillna(
+                0.0
+            ),
+            "value_vs_peak": ordered["current_value_eur"] / peak_to_date,
+        },
+        index=ordered.index,
+    )
+    return snapshots.join(ordered_features)
+
+
+def add_contract_context(snapshots: pd.DataFrame, players: pd.DataFrame) -> pd.DataFrame:
+    """Attach contract expiry as *display context only*.
+
+    players.csv carries just the current contract, so for historical snapshots the value
+    is the contract as of the scrape, not as of the snapshot date, and using it as a
+    training feature would leak the future (extensions granted after the snapshot).
+    It is meaningful for the latest snapshot per player, which is where notebook 02
+    shows it."""
+    snapshots = snapshots.copy()
+    contracts = players[["player_id", "contract_expiration_date"]].copy()
+    contracts["contract_expiration_date"] = pd.to_datetime(
+        contracts["contract_expiration_date"], errors="coerce"
+    )
+    snapshots = snapshots.merge(contracts, on="player_id", how="left")
+    snapshots["months_to_contract_expiry"] = (
+        snapshots["contract_expiration_date"] - snapshots["snapshot_date"]
+    ).dt.days / 30.44
     return snapshots
 
 
@@ -233,14 +322,18 @@ def _build_snapshot_panel_from_raw(data_dir: Path) -> pd.DataFrame:
     players = load_players(data_dir)
     valuations = load_valuations(data_dir)
     appearances = load_pl_appearances(data_dir)
+    appearances = appearances.merge(load_pl_starts(data_dir), on=["game_id", "player_id"], how="left")
+    appearances["started"] = appearances["started"].fillna(0).astype(int)
     transfers = load_transfers(data_dir)
 
     snapshots = valuations.rename(
         columns={"date": "snapshot_date", "market_value_in_eur": "current_value_eur"}
     )
     snapshots = add_trailing_form(snapshots, appearances)
+    snapshots = add_value_trend(snapshots)
     snapshots = add_transfer_history(snapshots, transfers)
     snapshots = add_horizon_targets(snapshots, valuations)
+    snapshots = add_contract_context(snapshots, players)
 
     snapshots = snapshots.merge(
         players[

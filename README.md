@@ -41,7 +41,11 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
 - `notebooks/02_value_growth_prediction.ipynb` — predicts value *change* over
   the next 3/6/9/12 months per player, using a panel of historical valuation
   snapshots with trailing performance features (`src/panel.py`) and the same
-  linear/Ridge/Lasso/XGBoost comparison (`src/modeling.py`).
+  linear/Ridge/Lasso/XGBoost comparison (`src/modeling.py`). Models fit
+  `log(future / current)` and, alongside age, form and transfer history, use
+  the player's own valuation trajectory (last change, time since, value vs.
+  career peak). Predictions come with a quantile-regression 10-90% range and
+  the player's contract expiry as context.
 - `notebooks/03_eye_test.ipynb` — uses the gap between actual value and a
   stats-only model's prediction as a proxy for value not explained by
   measurable output, then checks whether that gap correlates with big-six
@@ -56,17 +60,19 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   `src/modeling.py`): at each cutoff the model trains only on outcomes that had
   fully resolved by then, predicts 12 months forward, and is scored against what
   really happened. Every model ranks players by future growth with a Spearman
-  correlation of ~0.55 at every cutoff and horizon, and the players ranked in
+  correlation of ~0.55-0.6 at every cutoff and horizon, and the players ranked in
   the top tenth rose several times more than average in every window. The
   notebook also tests fixes for the model's tendency to undersize big moves:
   fitting `log(future / current)` instead of raw % change fixes calibration
-  (slope 0.97 vs 0.72) and is now the project default, while Huber loss and
+  (slope ~1.0 vs ~0.75) and is now the project default, while Huber loss and
   looser clipping don't help. Quantile-regression 10-90% intervals cover ~75%
   of outcomes walk-forward, with the shortfall concentrated in the pandemic
   markdown of 2020. Time-ordered grid search of the hyper-parameters
   (`tune_model`) is also evaluated walk-forward: it changes MAE and Spearman
   by a few thousandths and worsens calibration, so the hard-coded defaults are
-  kept and tuning stays opt-in.
+  kept and tuning stays opt-in. A feature ablation shows the value-trend
+  features lift 12-month Spearman from ~0.56 to ~0.59 (and 0.58 to 0.66 at 3
+  months), while cards and start-share add nothing.
 
 ## Tests
 

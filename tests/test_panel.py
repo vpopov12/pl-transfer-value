@@ -187,3 +187,80 @@ def test_panel_cache_path_is_keyed_on_data_and_schema_version(tmp_path: Path) ->
     path = panel_cache_path(data_dir)
     assert path.name == f"panel_data679_schema{PANEL_SCHEMA_VERSION}.parquet"
     assert path.parent.name == "processed"
+
+
+def test_value_trend_is_backward_looking_per_player() -> None:
+    from src.panel import add_value_trend
+
+    snapshots = pd.DataFrame(
+        {
+            "player_id": [1, 1, 1, 2],
+            "snapshot_date": [_dt("2020-01-01"), _dt("2020-07-01"), _dt("2021-01-01"), _dt("2020-06-15")],
+            "current_value_eur": [1_000_000, 2_000_000, 1_500_000, 5_000_000],
+        }
+    )
+    # Shuffle to make sure the result is aligned by index, not by position.
+    result = add_value_trend(snapshots.iloc[[3, 1, 0, 2]]).sort_index()
+
+    assert result["has_prev_valuation"].tolist() == [0, 1, 1, 0]
+    assert result["prev_value_change_pct"].tolist() == pytest.approx([0.0, 1.0, -0.25, 0.0])
+    assert result["months_since_prev_valuation"].round(1).tolist() == pytest.approx([0.0, 6.0, 6.0, 0.0])
+    # Player 1's peak so far is 2M at the second snapshot, so the third sits at 75% of peak.
+    assert result["value_vs_peak"].tolist() == pytest.approx([1.0, 1.0, 0.75, 1.0])
+
+
+def test_trailing_form_counts_cards_and_start_share() -> None:
+    from src.panel import add_trailing_form
+
+    appearances = pd.DataFrame(
+        {
+            "player_id": [1, 1, 1, 1],
+            "date": [_dt("2020-08-01"), _dt("2020-09-01"), _dt("2020-10-01"), _dt("2020-11-01")],
+            "goals": [0, 0, 0, 0],
+            "assists": [0, 0, 0, 0],
+            "minutes_played": [90, 90, 90, 90],
+            "club_position": [5, 5, 5, 5],
+            "yellow_cards": [1, 0, 1, 0],
+            "red_cards": [0, 0, 0, 1],
+            "started": [1, 1, 0, 1],
+        }
+    )
+    snapshots = pd.DataFrame({"player_id": [1], "snapshot_date": [_dt("2020-12-01")]})
+    result = add_trailing_form(snapshots, appearances)
+
+    assert result["trailing_yellow_cards"].iloc[0] == 2
+    assert result["trailing_red_cards"].iloc[0] == 1
+    # (2 yellows + 3 * 1 red) over 4 nineties.
+    assert result["trailing_cards_per90"].iloc[0] == pytest.approx(5 / 4)
+    assert result["trailing_starts"].iloc[0] == 3
+    assert result["trailing_start_share"].iloc[0] == pytest.approx(0.75)
+
+
+def test_trailing_form_works_without_card_or_start_columns() -> None:
+    from src.panel import add_trailing_form
+
+    appearances = pd.DataFrame(
+        {
+            "player_id": [1],
+            "date": [_dt("2020-08-01")],
+            "goals": [1],
+            "assists": [0],
+            "minutes_played": [90],
+            "club_position": [5],
+        }
+    )
+    snapshots = pd.DataFrame({"player_id": [1], "snapshot_date": [_dt("2020-12-01")]})
+    result = add_trailing_form(snapshots, appearances)
+    assert result["trailing_cards_per90"].iloc[0] == 0.0
+    assert result["trailing_start_share"].iloc[0] == 0.0
+
+
+def test_contract_context_measures_months_from_snapshot_and_keeps_missing_as_nan() -> None:
+    from src.panel import add_contract_context
+
+    snapshots = pd.DataFrame({"player_id": [1, 2], "snapshot_date": [_dt("2025-06-30"), _dt("2025-06-30")]})
+    players = pd.DataFrame({"player_id": [1, 2], "contract_expiration_date": ["2027-06-30", None]})
+    result = add_contract_context(snapshots, players)
+
+    assert result["months_to_contract_expiry"].iloc[0] == pytest.approx(24, abs=0.1)
+    assert pd.isna(result["months_to_contract_expiry"].iloc[1])

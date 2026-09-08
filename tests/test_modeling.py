@@ -84,9 +84,17 @@ def test_predict_value_growth_computes_dollar_change_consistently() -> None:
             "months_since_last_transfer": [12.0],
             "num_prior_transfers": [2],
             "last_transfer_fee_eur": [5_000_000.0],
+            "has_prev_valuation": [1],
+            "prev_value_change_pct": [0.2],
+            "months_since_prev_valuation": [6.0],
+            "value_vs_peak": [1.0],
+            "trailing_cards_per90": [0.1],
+            "trailing_start_share": [0.9],
+            "months_to_contract_expiry": [18.0],
         }
     )
     result = predict_value_growth(_StubPipeline(0.1), current_players)
+    assert result.iloc[0]["months_to_contract_expiry"] == 18.0
     assert result.iloc[0]["predicted_pct_change"] == pytest.approx(0.1)
     assert result.iloc[0]["predicted_eur_change"] == pytest.approx(1_000_000.0)
     assert result.iloc[0]["predicted_value_eur"] == pytest.approx(11_000_000.0)
@@ -110,6 +118,12 @@ def test_predict_value_growth_drops_rows_missing_required_features() -> None:
             "months_since_last_transfer": [12.0, 12.0],
             "num_prior_transfers": [2, 2],
             "last_transfer_fee_eur": [5_000_000.0, 5_000_000.0],
+            "has_prev_valuation": [1, 1],
+            "prev_value_change_pct": [0.2, 0.2],
+            "months_since_prev_valuation": [6.0, 6.0],
+            "value_vs_peak": [1.0, 1.0],
+            "trailing_cards_per90": [0.1, 0.1],
+            "trailing_start_share": [0.9, 0.9],
         }
     )
     result = predict_value_growth(_StubPipeline(0.1), current_players)
@@ -144,6 +158,12 @@ def _synthetic_panel(n_players: int = 40, n_dates: int = 30, seed: int = 0) -> p
                     "last_transfer_fee_eur": rng.uniform(0, 5e7),
                     "sub_position": rng.choice(["Centre-Forward", "Centre-Back"]),
                     "foot": "right",
+                    "has_prev_valuation": int(i > 0),
+                    "prev_value_change_pct": rng.normal(0, 0.2) if i > 0 else 0.0,
+                    "months_since_prev_valuation": 3.0 if i > 0 else 0.0,
+                    "value_vs_peak": rng.uniform(0.5, 1.0),
+                    "trailing_cards_per90": rng.uniform(0, 0.3),
+                    "trailing_start_share": rng.uniform(0, 1),
                     "value_change_12m_pct": 0.5 * goals_per90 - 0.02 * (age - 24) + rng.normal(0, 0.05),
                 }
             )
@@ -297,3 +317,44 @@ def test_train_horizon_models_reports_best_params_when_tuning() -> None:
     assert results["linear"]["best_params"] == {}
     assert "alpha" in results["ridge"]["best_params"]
     assert results["ridge"]["mae"] < 0.2
+
+
+def test_prepare_features_logs_previous_value_ratio_when_present() -> None:
+    panel = pd.DataFrame(
+        {
+            "current_value_eur": [1_000_000, 1_000_000],
+            "age": [20.0, 30.0],
+            "last_transfer_fee_eur": [0.0, 0.0],
+            "foot": ["right", "left"],
+            "sub_position": ["Centre-Forward", "Centre-Back"],
+            "prev_value_change_pct": [1.0, -0.5],
+        }
+    )
+    result = prepare_features(panel)
+    assert result["log_prev_value_ratio"].tolist() == pytest.approx([np.log(2.0), np.log(0.5)])
+
+
+def test_fit_model_can_be_restricted_to_a_feature_subset() -> None:
+    from src.modeling import BASE_NUMERIC_FEATURES, fit_model, modelable_rows
+
+    panel = _synthetic_panel(n_players=20, n_dates=8)
+    train = modelable_rows(panel, months=12)
+    restricted = fit_model(train, "linear", months=12, numeric_features=BASE_NUMERIC_FEATURES)
+    preds = predict_value_growth(restricted, train.head(10))
+    assert len(preds) == 10
+    used = restricted.regressor_.named_steps["preprocess"].transformers_[0][2]
+    assert list(used) == BASE_NUMERIC_FEATURES
+
+
+def test_predict_uses_the_columns_the_pipeline_was_fitted_with() -> None:
+    from src.modeling import ROLE_FEATURES, fit_model, modelable_rows, pipeline_feature_columns
+
+    panel = _synthetic_panel(n_players=20, n_dates=8)
+    extra = list(FEATURE_COLUMNS[: len(FEATURE_COLUMNS) - 2]) + ROLE_FEATURES  # not the default set
+    numeric = [c for c in extra if c not in ("sub_position", "foot")]
+    train = modelable_rows(panel, months=12, numeric_features=numeric)
+    pipeline = fit_model(train, "ridge", months=12, numeric_features=numeric)
+
+    assert set(pipeline_feature_columns(pipeline)) == set(numeric) | {"sub_position", "foot"}
+    preds = predict_value_growth(pipeline, train.head(5))
+    assert len(preds) == 5

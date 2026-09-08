@@ -20,7 +20,8 @@ from xgboost import XGBRegressor
 
 from src.panel import HORIZON_TOLERANCE_DAYS
 
-NUMERIC_FEATURES = [
+# The original feature set: current value, age, trailing on-pitch form, transfer history.
+BASE_NUMERIC_FEATURES = [
     "log_current_value_eur",
     "age",
     "age_sq",
@@ -34,8 +35,24 @@ NUMERIC_FEATURES = [
     "num_prior_transfers",
     "log_last_transfer_fee_eur",
 ]
+# Added later, and kept: the player's own valuation trajectory. Walk-forward (notebook 05)
+# these lift 12-month Spearman from ~0.56 to ~0.59 and cut MAE by ~4%.
+VALUE_TREND_FEATURES = [
+    "has_prev_valuation",
+    "log_prev_value_ratio",
+    "months_since_prev_valuation",
+    "value_vs_peak",
+]
+# Tested and *not* kept: discipline and starter-vs-substitute role added nothing walk-forward.
+# Still built into the panel so the ablation in notebook 05 can be re-run.
+ROLE_FEATURES = ["trailing_cards_per90", "trailing_start_share"]
+NUMERIC_FEATURES = BASE_NUMERIC_FEATURES + VALUE_TREND_FEATURES
 CATEGORICAL_FEATURES = ["sub_position", "foot"]
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
+
+# Carried through predictions for context, never used as a model input: players.csv only
+# knows the *current* contract, so for past snapshots it leaks later extensions.
+CONTEXT_COLUMNS = ["months_to_contract_expiry"]
 
 XGB_DEFAULTS = dict(
     n_estimators=300,
@@ -98,29 +115,58 @@ def prepare_features(panel: pd.DataFrame) -> pd.DataFrame:
     df["log_current_value_eur"] = np.log10(df["current_value_eur"])
     df["age_sq"] = df["age"] ** 2
     df["log_last_transfer_fee_eur"] = np.log1p(df["last_transfer_fee_eur"])
+    # Previous change is heavy-tailed (a few +50,000% academy re-valuations); log the ratio.
+    if "prev_value_change_pct" in df:
+        df["log_prev_value_ratio"] = np.log1p(df["prev_value_change_pct"].clip(lower=-0.99))
     df["foot"] = df["foot"].fillna("unknown")
     df["sub_position"] = df["sub_position"].fillna("unknown")
     return df
 
 
-def build_preprocessor() -> ColumnTransformer:
+def build_preprocessor(numeric_features: Sequence[str] = NUMERIC_FEATURES) -> ColumnTransformer:
     return ColumnTransformer(
         [
-            ("num", StandardScaler(), NUMERIC_FEATURES),
+            ("num", StandardScaler(), list(numeric_features)),
             ("cat", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
         ]
     )
+
+
+def feature_columns(numeric_features: Sequence[str] = NUMERIC_FEATURES) -> list[str]:
+    return list(numeric_features) + CATEGORICAL_FEATURES
+
+
+def pipeline_feature_columns(pipeline) -> list[str]:
+    """The input columns a fitted pipeline selects, read back from its ColumnTransformer.
+
+    Falls back to FEATURE_COLUMNS for anything that isn't one of our pipelines (tests
+    pass in stubs)."""
+    inner = pipeline.regressor_ if isinstance(pipeline, TransformedTargetRegressor) else pipeline
+    steps = getattr(inner, "named_steps", None)
+    if not steps or "preprocess" not in steps:
+        return FEATURE_COLUMNS
+    columns: list[str] = []
+    for _, transformer, selected in steps["preprocess"].transformers_:
+        if transformer != "drop":
+            columns.extend(selected)
+    return columns
 
 
 def _clip_target(y: pd.Series, clip: tuple[float, float] | None) -> pd.Series:
     return y if clip is None else y.clip(*clip)
 
 
-def build_pipeline(model, target_transform: str = DEFAULT_TARGET_TRANSFORM):
+def build_pipeline(
+    model,
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
+    numeric_features: Sequence[str] = NUMERIC_FEATURES,
+):
     """Preprocessing + model, optionally fitting on a transformed target.
 
-    With a transform, `.predict()` still returns values on the % change scale."""
-    pipeline = Pipeline([("preprocess", build_preprocessor()), ("model", model)])
+    With a transform, `.predict()` still returns values on the % change scale.
+    The fitted pipeline selects its own columns by name, so it can be given the full
+    feature frame at predict time whichever `numeric_features` it was built with."""
+    pipeline = Pipeline([("preprocess", build_preprocessor(numeric_features)), ("model", model)])
     func, inverse = TARGET_TRANSFORMS[target_transform]
     if func is None:
         return pipeline
@@ -139,6 +185,7 @@ def tune_model(
     target_transform: str = DEFAULT_TARGET_TRANSFORM,
     clip: tuple[float, float] | None = TARGET_CLIP,
     n_splits: int = 3,
+    numeric_features: Sequence[str] = NUMERIC_FEATURES,
 ) -> tuple[object, dict[str, object]]:
     """Grid-search PARAM_GRIDS[model_name] with time-ordered CV on the training rows.
 
@@ -147,10 +194,11 @@ def tune_model(
     Returns the refitted best pipeline and its chosen parameters (estimator names)."""
     grid = PARAM_GRIDS.get(model_name, {})
     train = train.sort_values("snapshot_date")
-    pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform)
+    pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform, numeric_features)
+    columns = feature_columns(numeric_features)
     y_train = _clip_target(train[target_column(months)], clip)
     if not grid:
-        pipeline.fit(train[FEATURE_COLUMNS], y_train)
+        pipeline.fit(train[columns], y_train)
         return pipeline, {}
 
     prefix = _model_param_prefix(pipeline)
@@ -161,7 +209,7 @@ def tune_model(
         scoring="neg_mean_absolute_error",
         n_jobs=-1,
     )
-    search.fit(train[FEATURE_COLUMNS], y_train)
+    search.fit(train[columns], y_train)
     best_params = {key.removeprefix(prefix): value for key, value in search.best_params_.items()}
     return search.best_estimator_, best_params
 
@@ -173,17 +221,21 @@ def fit_model(
     target_transform: str = DEFAULT_TARGET_TRANSFORM,
     clip: tuple[float, float] | None = TARGET_CLIP,
     tune: bool = False,
+    numeric_features: Sequence[str] = NUMERIC_FEATURES,
 ):
     """Fit one named model on already-prepared training rows for the given horizon.
 
     With `tune=True` the hyper-parameters come from `tune_model` instead of the
-    hard-coded defaults in MODEL_FACTORIES."""
+    hard-coded defaults in MODEL_FACTORIES. `numeric_features` narrows the inputs
+    (e.g. BASE_NUMERIC_FEATURES for an ablation)."""
     if tune:
-        pipeline, _ = tune_model(train, model_name, months, target_transform, clip)
+        pipeline, _ = tune_model(
+            train, model_name, months, target_transform, clip, numeric_features=numeric_features
+        )
         return pipeline
-    pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform)
+    pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform, numeric_features)
     y_train = _clip_target(train[target_column(months)], clip)
-    pipeline.fit(train[FEATURE_COLUMNS], y_train)
+    pipeline.fit(train[feature_columns(numeric_features)], y_train)
     return pipeline
 
 
@@ -207,18 +259,22 @@ def fit_quantile_models(
 
 def predict_value_growth_interval(models: dict[float, object], current_players: pd.DataFrame) -> pd.DataFrame:
     """Predicted % change at each fitted quantile, plus the implied value range in EUR."""
-    df = prepare_features(current_players).dropna(subset=FEATURE_COLUMNS)
+    columns = pipeline_feature_columns(next(iter(models.values())))
+    df = prepare_features(current_players).dropna(subset=columns)
     out = df[["player_id", "name", "sub_position", "age", "current_value_eur"]].copy()
     for q, pipeline in models.items():
-        out[f"pct_q{int(round(q * 100)):02d}"] = pipeline.predict(df[FEATURE_COLUMNS])
+        out[f"pct_q{int(round(q * 100)):02d}"] = pipeline.predict(df[columns])
     for col in [c for c in out.columns if c.startswith("pct_q")]:
         out[col.replace("pct_", "value_eur_")] = out["current_value_eur"] * (1 + out[col])
     return out
 
 
-def modelable_rows(panel: pd.DataFrame, months: int) -> pd.DataFrame:
+def modelable_rows(
+    panel: pd.DataFrame, months: int, numeric_features: Sequence[str] = NUMERIC_FEATURES
+) -> pd.DataFrame:
     """Prepared rows with every feature and this horizon's target present."""
-    return prepare_features(panel).dropna(subset=FEATURE_COLUMNS + [target_column(months), "snapshot_date"])
+    required = feature_columns(numeric_features) + [target_column(months), "snapshot_date"]
+    return prepare_features(panel).dropna(subset=required)
 
 
 def time_based_split(df: pd.DataFrame, test_frac: float = 0.2) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -271,9 +327,11 @@ def latest_snapshot_per_player(panel: pd.DataFrame, max_age_days: int = 365) -> 
 
 def predict_value_growth(pipeline: Pipeline, current_players: pd.DataFrame) -> pd.DataFrame:
     """Predict % and $ value change for the given current-player snapshot rows."""
-    df = prepare_features(current_players).dropna(subset=FEATURE_COLUMNS)
-    predicted_pct = pipeline.predict(df[FEATURE_COLUMNS])
-    out = df[["player_id", "name", "sub_position", "age", "current_value_eur"]].copy()
+    columns = pipeline_feature_columns(pipeline)
+    df = prepare_features(current_players).dropna(subset=columns)
+    predicted_pct = pipeline.predict(df[columns])
+    context = [c for c in CONTEXT_COLUMNS if c in df]
+    out = df[["player_id", "name", "sub_position", "age", "current_value_eur", *context]].copy()
     out["predicted_pct_change"] = predicted_pct
     out["predicted_eur_change"] = predicted_pct * out["current_value_eur"]
     out["predicted_value_eur"] = out["current_value_eur"] + out["predicted_eur_change"]
@@ -368,6 +426,7 @@ def walk_forward_backtest(
     target_transform: str = DEFAULT_TARGET_TRANSFORM,
     clip: tuple[float, float] | None = TARGET_CLIP,
     tune: bool = False,
+    numeric_features: Sequence[str] = NUMERIC_FEATURES,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Repeat "train up to T, predict T + months, score against what actually happened"
     for several cutoff dates T and every named model.
@@ -382,7 +441,7 @@ def walk_forward_backtest(
         predictions: one row per (cutoff, model, player) with predicted and actual
             % change, for plotting and case studies.
     """
-    usable = modelable_rows(panel, months)
+    usable = modelable_rows(panel, months, numeric_features)
     if cutoffs is None:
         cutoffs = default_backtest_cutoffs(panel, months)
     target_col = target_column(months)
@@ -396,7 +455,9 @@ def walk_forward_backtest(
         if train.empty or eval_rows.empty:
             continue
         for name in model_names:
-            pipeline = fit_model(train, name, months, target_transform, clip, tune=tune)
+            pipeline = fit_model(
+                train, name, months, target_transform, clip, tune=tune, numeric_features=numeric_features
+            )
             preds = predict_value_growth(pipeline, eval_rows)
             preds = preds.merge(
                 eval_rows[["player_id", "snapshot_date", target_col]].rename(
