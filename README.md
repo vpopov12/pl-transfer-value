@@ -20,6 +20,17 @@ The valuation-snapshot panel used by notebooks 02-05 is cached as parquet in
 re-opening a notebook reloads it in well under a second instead of rebuilding
 it from the raw CSVs. Pass `build_snapshot_panel(cache=False)` to force a rebuild.
 
+## Checking for new data
+
+Notebook 02's forward predictions only become a true out-of-sample test once the
+upstream Kaggle dataset is re-scraped with valuations dated after the panel's
+last snapshot. To check (and optionally force a re-download):
+
+```
+uv run python -m src.data_refresh            # report dataset version and latest dates
+uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newest version
+```
+
 ## Notebooks
 
 - `notebooks/01_eda.ipynb` — distribution of market value, value vs. age,
