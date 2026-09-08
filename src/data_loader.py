@@ -52,9 +52,7 @@ def load_appearances(data_dir: Path) -> pd.DataFrame:
     appearances = pd.read_csv(data_dir / "appearances.csv")
     appearances["date"] = pd.to_datetime(appearances["date"], errors="coerce")
     appearances["season"] = _season_from_date(appearances["date"])
-    appearances = appearances[
-        appearances["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID
-    ]
+    appearances = appearances[appearances["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID]
     return appearances.groupby(["player_id", "season"], as_index=False).agg(
         goals=("goals", "sum"),
         assists=("assists", "sum"),

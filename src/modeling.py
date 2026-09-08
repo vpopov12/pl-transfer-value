@@ -44,7 +44,10 @@ MODEL_FACTORIES = {
     ),
 }
 
-TARGET_CLIP = (-0.95, 5.0)  # cap training/eval target so a few breakout outliers don't dominate squared-error fits
+TARGET_CLIP = (
+    -0.95,
+    5.0,
+)  # cap training/eval target so a few breakout outliers don't dominate squared-error fits
 
 
 def prepare_features(panel: pd.DataFrame) -> pd.DataFrame:

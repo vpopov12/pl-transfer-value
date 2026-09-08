@@ -4,6 +4,18 @@ Predict Premier League player transfer market value from performance and age
 using regression, comparing a linear baseline against regularized (Ridge/Lasso)
 and tree-based (XGBoost) models.
 
+## Setup
+
+Dependencies are managed with [uv](https://docs.astral.sh/uv/) and pinned in
+`uv.lock`:
+
+```
+uv sync --all-groups
+uv run jupyter lab
+```
+
+The Kaggle dataset is downloaded into `data/raw/` on first use via `kagglehub`.
+
 ## Notebooks
 
 - `notebooks/01_eda.ipynb` — distribution of market value, value vs. age,

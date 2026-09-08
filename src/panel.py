@@ -44,9 +44,7 @@ def load_valuations(data_dir: Path) -> pd.DataFrame:
 def load_pl_games(data_dir: Path) -> pd.DataFrame:
     games = pd.read_csv(data_dir / "games.csv")
     games = games[games["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID]
-    return games[
-        ["game_id", "home_club_id", "away_club_id", "home_club_position", "away_club_position"]
-    ]
+    return games[["game_id", "home_club_id", "away_club_id", "home_club_position", "away_club_position"]]
 
 
 def load_pl_appearances(data_dir: Path) -> pd.DataFrame:
@@ -123,7 +121,9 @@ def add_trailing_form(snapshots: pd.DataFrame, appearances: pd.DataFrame) -> pd.
     nineties = snapshots["trailing_minutes"] / 90
     enough_minutes = snapshots["trailing_minutes"] >= MIN_MINUTES_FOR_RATE
     snapshots["trailing_goals_per90"] = np.where(enough_minutes, snapshots["trailing_goals"] / nineties, 0.0)
-    snapshots["trailing_assists_per90"] = np.where(enough_minutes, snapshots["trailing_assists"] / nineties, 0.0)
+    snapshots["trailing_assists_per90"] = np.where(
+        enough_minutes, snapshots["trailing_assists"] / nineties, 0.0
+    )
 
     # Average league position of the player's club over the trailing window (1 = top of table),
     # a proxy for the strength of the team context the player's performance happened in.

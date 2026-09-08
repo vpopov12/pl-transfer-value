@@ -6,8 +6,8 @@ import pytest
 
 from src.modeling import (
     latest_snapshot_per_player,
-    prepare_features,
     predict_value_growth,
+    prepare_features,
     time_based_split,
 )
 
