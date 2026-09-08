@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
 from src.panel import (
+    PANEL_SCHEMA_VERSION,
     _asof_cumulative,
     _career_cumulative_stats,
     add_horizon_targets,
     add_trailing_form,
     add_transfer_history,
+    panel_cache_path,
 )
 
 
@@ -176,3 +180,10 @@ def test_horizon_target_never_matches_a_valuation_before_the_snapshot() -> None:
     )
     result = add_horizon_targets(snapshots, valuations)
     assert pd.isna(result.iloc[0]["future_value_12m_eur"])
+
+
+def test_panel_cache_path_is_keyed_on_data_and_schema_version(tmp_path: Path) -> None:
+    data_dir = tmp_path / "versions" / "679"
+    path = panel_cache_path(data_dir)
+    assert path.name == f"panel_data679_schema{PANEL_SCHEMA_VERSION}.parquet"
+    assert path.parent.name == "processed"

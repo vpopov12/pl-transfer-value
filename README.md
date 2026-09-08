@@ -15,6 +15,10 @@ uv run jupyter lab
 ```
 
 The Kaggle dataset is downloaded into `data/raw/` on first use via `kagglehub`.
+The valuation-snapshot panel used by notebooks 02-05 is cached as parquet in
+`data/processed/` (keyed on dataset version and panel schema version), so
+re-opening a notebook reloads it in well under a second instead of rebuilding
+it from the raw CSVs. Pass `build_snapshot_panel(cache=False)` to force a rebuild.
 
 ## Notebooks
 

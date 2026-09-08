@@ -15,7 +15,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.data_loader import PREMIER_LEAGUE_COMPETITION_ID, download_dataset, load_players
+from src.data_loader import (
+    PREMIER_LEAGUE_COMPETITION_ID,
+    PROJECT_ROOT,
+    download_dataset,
+    load_players,
+)
+
+# Bump whenever the panel's columns or their semantics change, so stale parquet
+# caches built from an older feature set are ignored rather than silently reused.
+PANEL_SCHEMA_VERSION = 1
+PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
 
 HORIZONS_MONTHS = (3, 6, 9, 12)
 TRAILING_WINDOW_DAYS = 365
@@ -194,9 +204,32 @@ def add_horizon_targets(snapshots: pd.DataFrame, valuations: pd.DataFrame) -> pd
     return snapshots
 
 
-def build_snapshot_panel() -> pd.DataFrame:
-    """Build the full valuation-snapshot panel: one row per historical PL valuation event."""
+def panel_cache_path(data_dir: Path) -> Path:
+    """Parquet cache location for the panel built from this dataset version.
+
+    kagglehub stores each dataset version under `.../versions/<n>`, so the directory
+    name doubles as the data-version key."""
+    return PROCESSED_DATA_DIR / f"panel_data{data_dir.name}_schema{PANEL_SCHEMA_VERSION}.parquet"
+
+
+def build_snapshot_panel(cache: bool = True) -> pd.DataFrame:
+    """Build the full valuation-snapshot panel: one row per historical PL valuation event.
+
+    With `cache=True` (default) the result is written to `data/processed/` as parquet and
+    reused on later calls, keyed on the dataset version and PANEL_SCHEMA_VERSION."""
     data_dir = download_dataset()
+    cache_path = panel_cache_path(data_dir)
+    if cache and cache_path.exists():
+        return pd.read_parquet(cache_path)
+
+    panel = _build_snapshot_panel_from_raw(data_dir)
+    if cache:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        panel.to_parquet(cache_path, index=False)
+    return panel
+
+
+def _build_snapshot_panel_from_raw(data_dir: Path) -> pd.DataFrame:
     players = load_players(data_dir)
     valuations = load_valuations(data_dir)
     appearances = load_pl_appearances(data_dir)
