@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
-from src.analysis import flag_transfers_within_horizon, grouped_backtest_metrics
+from src.analysis import flag_transfers_within_horizon, grouped_backtest_metrics, market_drift_decomposition
 
 
 def _dt(s: str) -> pd.Timestamp:
@@ -58,3 +59,21 @@ def test_grouped_backtest_metrics_scores_each_group_per_cutoff() -> None:
     assert len(metrics) == 4
     assert metrics.loc[metrics["flag"], "share"].tolist() == pytest.approx([0.75, 0.75])
     assert metrics["spearman"].tolist() == pytest.approx([1.0] * 4)
+
+
+def test_market_drift_decomposition_removes_a_uniform_bias_entirely() -> None:
+    # The model gets every player's relative move right but misses a market-wide -20%.
+    actual = pd.Series([0.1, 0.3, -0.2, 0.0]) * 0.8 - 0.2
+    predictions = pd.DataFrame(
+        {
+            "cutoff": [_dt("2020-01-01")] * 4,
+            "predicted_pct_change": [0.1, 0.3, -0.2, 0.0],
+            "actual_pct_change": actual,
+        }
+    )
+    out = market_drift_decomposition(predictions)
+
+    assert len(out) == 1
+    assert out["market_bias"].iloc[0] == pytest.approx(-np.log(0.8), abs=1e-9)
+    assert out["mae_demeaned"].iloc[0] == pytest.approx(0.0, abs=1e-9)
+    assert out["share_of_mae_from_market"].iloc[0] == pytest.approx(1.0)

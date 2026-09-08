@@ -24,7 +24,7 @@ from src.data_loader import (
 
 # Bump whenever the panel's columns or their semantics change, so stale parquet
 # caches built from an older feature set are ignored rather than silently reused.
-PANEL_SCHEMA_VERSION = 2
+PANEL_SCHEMA_VERSION = 3
 PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
 
 HORIZONS_MONTHS = (3, 6, 9, 12)
@@ -53,7 +53,7 @@ def load_valuations(data_dir: Path) -> pd.DataFrame:
         valuations["player_club_domestic_competition_id"] == PREMIER_LEAGUE_COMPETITION_ID
     ]
     return (
-        valuations[["player_id", "date", "market_value_in_eur", "current_club_name"]]
+        valuations[["player_id", "date", "market_value_in_eur", "current_club_id", "current_club_name"]]
         .dropna(subset=["player_id", "date", "market_value_in_eur"])
         .sort_values("date")
         .reset_index(drop=True)
@@ -217,6 +217,43 @@ def add_value_trend(snapshots: pd.DataFrame) -> pd.DataFrame:
     return snapshots.join(ordered_features)
 
 
+def add_market_context(snapshots: pd.DataFrame, window_days: int = TRAILING_WINDOW_DAYS) -> pd.DataFrame:
+    """Add the league-wide valuation drift the player was exposed to: the mean log change
+    across *all* PL re-valuations in the trailing window as of each snapshot date.
+
+    Requires `add_value_trend` to have run (uses prev_value_change_pct). Strictly
+    backward-looking, so it can be a model feature; it lets the model see that the whole
+    market has been rising or falling rather than attributing that to the player."""
+    snapshots = snapshots.copy()
+    revalued = snapshots[snapshots["has_prev_valuation"] == 1]
+    log_change = np.log1p(revalued["prev_value_change_pct"].clip(lower=-0.99))
+    daily = (
+        pd.DataFrame({"date": revalued["snapshot_date"], "log_change": log_change})
+        .groupby("date")
+        .agg(total=("log_change", "sum"), count=("log_change", "size"))
+        .sort_index()
+    )
+    daily["cum_total"] = daily["total"].cumsum()
+    daily["cum_count"] = daily["count"].cumsum()
+    cum = daily[["cum_total", "cum_count"]]
+
+    def cumulative_asof(dates: pd.Series) -> pd.DataFrame:
+        idx = cum.index.searchsorted(dates.to_numpy(), side="right") - 1
+        out = cum.iloc[idx.clip(min=0)].reset_index(drop=True)
+        out[idx < 0] = 0.0
+        out.index = dates.index
+        return out
+
+    now = cumulative_asof(snapshots["snapshot_date"])
+    before = cumulative_asof(snapshots["snapshot_date"] - pd.Timedelta(days=window_days))
+    window_total = now["cum_total"] - before["cum_total"]
+    window_count = now["cum_count"] - before["cum_count"]
+    snapshots["market_trailing_12m_change"] = np.where(
+        window_count > 0, window_total / window_count.where(window_count > 0, 1), 0.0
+    )
+    return snapshots
+
+
 def add_contract_context(snapshots: pd.DataFrame, players: pd.DataFrame) -> pd.DataFrame:
     """Attach contract expiry as *display context only*.
 
@@ -331,6 +368,7 @@ def _build_snapshot_panel_from_raw(data_dir: Path) -> pd.DataFrame:
     )
     snapshots = add_trailing_form(snapshots, appearances)
     snapshots = add_value_trend(snapshots)
+    snapshots = add_market_context(snapshots)
     snapshots = add_transfer_history(snapshots, transfers)
     snapshots = add_horizon_targets(snapshots, valuations)
     snapshots = add_contract_context(snapshots, players)

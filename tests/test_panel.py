@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -264,3 +265,27 @@ def test_contract_context_measures_months_from_snapshot_and_keeps_missing_as_nan
 
     assert result["months_to_contract_expiry"].iloc[0] == pytest.approx(24, abs=0.1)
     assert pd.isna(result["months_to_contract_expiry"].iloc[1])
+
+
+def test_market_context_averages_league_wide_log_changes_in_the_trailing_window() -> None:
+    from src.panel import add_market_context
+
+    snapshots = pd.DataFrame(
+        {
+            "player_id": [1, 2, 3, 4],
+            "snapshot_date": [_dt("2020-01-01"), _dt("2020-06-01"), _dt("2020-09-01"), _dt("2021-10-01")],
+            "has_prev_valuation": [0, 1, 1, 1],
+            # player 2 doubled, player 3 halved: log changes +0.693 and -0.693
+            "prev_value_change_pct": [0.0, 1.0, -0.5, 0.25],
+        }
+    )
+    result = add_market_context(snapshots)
+
+    # No re-valuations in the year before Jan 2020 -> neutral 0.
+    assert result["market_trailing_12m_change"].iloc[0] == 0.0
+    # As of Jun 2020 only player 2's re-valuation is in the window.
+    assert result["market_trailing_12m_change"].iloc[1] == pytest.approx(np.log(2))
+    # As of Sep 2020 both are in the window and cancel out.
+    assert result["market_trailing_12m_change"].iloc[2] == pytest.approx(0.0)
+    # Oct 2021: both 2020 re-valuations are more than a year old; only the +25% remains.
+    assert result["market_trailing_12m_change"].iloc[3] == pytest.approx(np.log(1.25))

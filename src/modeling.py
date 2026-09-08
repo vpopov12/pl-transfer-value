@@ -46,6 +46,8 @@ VALUE_TREND_FEATURES = [
 # Tested and *not* kept: discipline and starter-vs-substitute role added nothing walk-forward.
 # Still built into the panel so the ablation in notebook 05 can be re-run.
 ROLE_FEATURES = ["trailing_cards_per90", "trailing_start_share"]
+# League-wide valuation drift over the trailing year; tested in notebook 06.
+MARKET_FEATURES = ["market_trailing_12m_change"]
 NUMERIC_FEATURES = BASE_NUMERIC_FEATURES + VALUE_TREND_FEATURES
 CATEGORICAL_FEATURES = ["sub_position", "foot"]
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES

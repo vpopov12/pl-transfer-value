@@ -5,9 +5,10 @@ Used by notebook 06; the heavy lifting (training, walk-forward) stays in modelin
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
-from src.modeling import _backtest_metrics
+from src.modeling import TARGET_CLIP, _backtest_metrics
 from src.panel import HORIZON_TOLERANCE_DAYS
 
 
@@ -63,3 +64,32 @@ def grouped_backtest_metrics(predictions: pd.DataFrame, group_col: str, min_rows
             }
         )
     return pd.DataFrame(rows)
+
+
+def market_drift_decomposition(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Per cutoff: how much the whole market moved, what the model implicitly assumed it
+    would, and how much error disappears once that market-wide bias is removed.
+
+    Works on log(value ratio) so up and down moves are symmetric. `mae_demeaned` is the
+    error after subtracting each cutoff's mean error from every prediction, i.e. the
+    error a model with perfect knowledge of the market-wide move would have had; the gap
+    to `mae` is the price of not knowing where the market is heading."""
+    rows = []
+    for cutoff, part in predictions.groupby("cutoff"):
+        actual = np.log1p(part["actual_pct_change"].clip(*TARGET_CLIP))
+        predicted = np.log1p(part["predicted_pct_change"].clip(*TARGET_CLIP))
+        error = predicted - actual
+        rows.append(
+            {
+                "cutoff": cutoff,
+                "n": len(part),
+                "market_actual_log_change": float(actual.mean()),
+                "market_predicted_log_change": float(predicted.mean()),
+                "market_bias": float(error.mean()),
+                "mae": float(error.abs().mean()),
+                "mae_demeaned": float((error - error.mean()).abs().mean()),
+            }
+        )
+    out = pd.DataFrame(rows)
+    out["share_of_mae_from_market"] = 1 - out["mae_demeaned"] / out["mae"]
+    return out
