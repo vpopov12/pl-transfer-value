@@ -63,7 +63,10 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   (slope 0.97 vs 0.72) and is now the project default, while Huber loss and
   looser clipping don't help. Quantile-regression 10-90% intervals cover ~75%
   of outcomes walk-forward, with the shortfall concentrated in the pandemic
-  markdown of 2020.
+  markdown of 2020. Time-ordered grid search of the hyper-parameters
+  (`tune_model`) is also evaluated walk-forward: it changes MAE and Spearman
+  by a few thousandths and worsens calibration, so the hard-coded defaults are
+  kept and tuning stays opt-in.
 
 ## Tests
 

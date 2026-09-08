@@ -13,6 +13,7 @@ from scipy.stats import spearmanr
 from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBRegressor
@@ -53,6 +54,21 @@ MODEL_FACTORIES = {
     # Pseudo-Huber loss: squared error near zero, absolute error in the tails, so a
     # handful of extreme breakouts pull the fit less than under plain squared error.
     "xgboost_huber": lambda: XGBRegressor(objective="reg:pseudohubererror", huber_slope=1.0, **XGB_DEFAULTS),
+}
+
+# Small grids searched by `tune_model` with time-ordered cross-validation. Kept small on
+# purpose: each combination is a full fit, and the walk-forward backtest refits at every
+# cutoff. Keys are the estimator's own parameter names.
+PARAM_GRIDS: dict[str, dict[str, list]] = {
+    "linear": {},
+    "ridge": {"alpha": [1.0, 10.0, 100.0, 1000.0]},
+    "lasso": {"alpha": [0.0003, 0.001, 0.003, 0.01]},
+    "xgboost": {"max_depth": [2, 3, 4, 6], "n_estimators": [100, 200, 400], "learning_rate": [0.03, 0.1]},
+    "xgboost_huber": {
+        "max_depth": [2, 3, 4, 6],
+        "n_estimators": [100, 200, 400],
+        "learning_rate": [0.03, 0.1],
+    },
 }
 
 # Cap training/eval target so a few breakout outliers don't dominate squared-error fits.
@@ -111,14 +127,60 @@ def build_pipeline(model, target_transform: str = DEFAULT_TARGET_TRANSFORM):
     return TransformedTargetRegressor(regressor=pipeline, func=func, inverse_func=inverse)
 
 
+def _model_param_prefix(pipeline) -> str:
+    """Where the estimator's own params live inside the (possibly target-wrapped) pipeline."""
+    return "regressor__model__" if isinstance(pipeline, TransformedTargetRegressor) else "model__"
+
+
+def tune_model(
+    train: pd.DataFrame,
+    model_name: str,
+    months: int,
+    target_transform: str = DEFAULT_TARGET_TRANSFORM,
+    clip: tuple[float, float] | None = TARGET_CLIP,
+    n_splits: int = 3,
+) -> tuple[object, dict[str, object]]:
+    """Grid-search PARAM_GRIDS[model_name] with time-ordered CV on the training rows.
+
+    Rows are sorted by snapshot date first so each TimeSeriesSplit fold validates on
+    snapshots later than everything it trained on. Scored on MAE of % change.
+    Returns the refitted best pipeline and its chosen parameters (estimator names)."""
+    grid = PARAM_GRIDS.get(model_name, {})
+    train = train.sort_values("snapshot_date")
+    pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform)
+    y_train = _clip_target(train[target_column(months)], clip)
+    if not grid:
+        pipeline.fit(train[FEATURE_COLUMNS], y_train)
+        return pipeline, {}
+
+    prefix = _model_param_prefix(pipeline)
+    search = GridSearchCV(
+        pipeline,
+        {prefix + key: values for key, values in grid.items()},
+        cv=TimeSeriesSplit(n_splits=n_splits),
+        scoring="neg_mean_absolute_error",
+        n_jobs=-1,
+    )
+    search.fit(train[FEATURE_COLUMNS], y_train)
+    best_params = {key.removeprefix(prefix): value for key, value in search.best_params_.items()}
+    return search.best_estimator_, best_params
+
+
 def fit_model(
     train: pd.DataFrame,
     model_name: str,
     months: int,
     target_transform: str = DEFAULT_TARGET_TRANSFORM,
     clip: tuple[float, float] | None = TARGET_CLIP,
+    tune: bool = False,
 ):
-    """Fit one named model on already-prepared training rows for the given horizon."""
+    """Fit one named model on already-prepared training rows for the given horizon.
+
+    With `tune=True` the hyper-parameters come from `tune_model` instead of the
+    hard-coded defaults in MODEL_FACTORIES."""
+    if tune:
+        pipeline, _ = tune_model(train, model_name, months, target_transform, clip)
+        return pipeline
     pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform)
     y_train = _clip_target(train[target_column(months)], clip)
     pipeline.fit(train[FEATURE_COLUMNS], y_train)
@@ -164,18 +226,32 @@ def time_based_split(df: pd.DataFrame, test_frac: float = 0.2) -> tuple[pd.DataF
     return df[df["snapshot_date"] <= cutoff], df[df["snapshot_date"] > cutoff]
 
 
-def train_horizon_models(panel: pd.DataFrame, months: int, test_frac: float = 0.2) -> dict:
-    """Fit every model in MODEL_FACTORIES for one horizon and report held-out metrics."""
+def train_horizon_models(
+    panel: pd.DataFrame,
+    months: int,
+    test_frac: float = 0.2,
+    tune: bool = False,
+    model_names: Sequence[str] | None = None,
+) -> dict:
+    """Fit every model (or `model_names`) for one horizon and report held-out metrics.
+
+    With `tune=True` each model's hyper-parameters are grid-searched with time-ordered
+    CV inside the training split first, and the chosen values are reported as
+    `best_params`."""
     df = modelable_rows(panel, months)
     train, test = time_based_split(df, test_frac)
     y_test = test[target_column(months)].clip(*TARGET_CLIP)
 
     results = {}
-    for name in MODEL_FACTORIES:
-        pipeline = fit_model(train, name, months)
+    for name in model_names or MODEL_FACTORIES:
+        if tune:
+            pipeline, best_params = tune_model(train, name, months)
+        else:
+            pipeline, best_params = fit_model(train, name, months), {}
         pred = pipeline.predict(test[FEATURE_COLUMNS])
         results[name] = {
             "pipeline": pipeline,
+            "best_params": best_params,
             "mae": mean_absolute_error(y_test, pred),
             "rmse": float(np.sqrt(mean_squared_error(y_test, pred))),
             "r2": r2_score(y_test, pred),
@@ -291,6 +367,7 @@ def walk_forward_backtest(
     max_age_days: int = 365,
     target_transform: str = DEFAULT_TARGET_TRANSFORM,
     clip: tuple[float, float] | None = TARGET_CLIP,
+    tune: bool = False,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Repeat "train up to T, predict T + months, score against what actually happened"
     for several cutoff dates T and every named model.
@@ -319,7 +396,7 @@ def walk_forward_backtest(
         if train.empty or eval_rows.empty:
             continue
         for name in model_names:
-            pipeline = fit_model(train, name, months, target_transform, clip)
+            pipeline = fit_model(train, name, months, target_transform, clip, tune=tune)
             preds = predict_value_growth(pipeline, eval_rows)
             preds = preds.merge(
                 eval_rows[["player_id", "snapshot_date", target_col]].rename(

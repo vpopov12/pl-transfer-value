@@ -269,3 +269,31 @@ def test_walk_forward_interval_backtest_reports_coverage_per_cutoff() -> None:
     assert coverage["cutoff"].tolist() == cutoffs
     assert ((coverage["coverage"] + coverage["below_low"] + coverage["above_high"]).round(6) == 1.0).all()
     assert (coverage["median_width"] > 0).all()
+
+
+def test_tune_model_returns_params_from_the_grid_and_skips_models_without_one() -> None:
+    from src.modeling import PARAM_GRIDS, modelable_rows, tune_model
+
+    panel = _synthetic_panel(n_players=30, n_dates=12)
+    train = modelable_rows(panel, months=12)
+
+    linear, linear_params = tune_model(train, "linear", months=12)
+    assert linear_params == {}
+    assert linear.predict(train[FEATURE_COLUMNS]).shape == (len(train),)
+
+    ridge, ridge_params = tune_model(train, "ridge", months=12, n_splits=2)
+    assert set(ridge_params) == {"alpha"}
+    assert ridge_params["alpha"] in PARAM_GRIDS["ridge"]["alpha"]
+    # The returned estimator is refit with the chosen value and predicts on the % scale.
+    fitted_alpha = ridge.regressor_.named_steps["model"].alpha
+    assert fitted_alpha == ridge_params["alpha"]
+
+
+def test_train_horizon_models_reports_best_params_when_tuning() -> None:
+    from src.modeling import train_horizon_models
+
+    panel = _synthetic_panel(n_players=30, n_dates=12)
+    results = train_horizon_models(panel, months=12, tune=True, model_names=("linear", "ridge"))
+    assert results["linear"]["best_params"] == {}
+    assert "alpha" in results["ridge"]["best_params"]
+    assert results["ridge"]["mae"] < 0.2
