@@ -358,3 +358,30 @@ def test_predict_uses_the_columns_the_pipeline_was_fitted_with() -> None:
     assert set(pipeline_feature_columns(pipeline)) == set(numeric) | {"sub_position", "foot"}
     preds = predict_value_growth(pipeline, train.head(5))
     assert len(preds) == 5
+
+
+def test_hurdle_regressor_multiplies_move_probability_by_conditional_size() -> None:
+    from src.modeling import HurdleRegressor
+
+    rng = np.random.default_rng(0)
+    n = 600
+    X = rng.uniform(0, 1, (n, 2))
+    moved = X[:, 0] > 0.5  # only the right half of the space ever moves
+    y = np.where(moved, 0.5 + X[:, 1], 0.0)
+    model = HurdleRegressor().fit(X, y)
+
+    left = np.column_stack([np.full(50, 0.1), np.linspace(0, 1, 50)])
+    right = np.column_stack([np.full(50, 0.9), np.linspace(0, 1, 50)])
+    assert model.predict_proba_moved(left).mean() < 0.15
+    assert model.predict_proba_moved(right).mean() > 0.85
+    assert np.abs(model.predict(left)).mean() < 0.15
+    assert np.abs(model.predict(right) - (0.5 + np.linspace(0, 1, 50))).mean() < 0.15
+
+
+def test_fit_model_accepts_experimental_hurdle_by_name() -> None:
+    from src.modeling import fit_model, modelable_rows
+
+    panel = _synthetic_panel(n_players=20, n_dates=8)
+    train = modelable_rows(panel, months=12)
+    pipeline = fit_model(train, "hurdle", months=12)
+    assert predict_value_growth(pipeline, train.head(5)).shape[0] == 5

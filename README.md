@@ -75,12 +75,16 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   months), while cards and start-share add nothing.
 
 - `notebooks/06_why_it_works.ipynb` — asks *why* the growth model works and
-  when it doesn't, all walk-forward (`src/analysis.py`): whether the signal is
-  really transfer anticipation (it isn't: stayers are ranked better than
-  movers), market-wide drift vs. player-specific error, whether the
-  "eye-test premium" gets corrected, survivorship of players who leave the
-  league, momentum vs. mean reversion by value tier, a two-stage model for the
-  zero-change spike, and relegation as an unseen shock.
+  when it doesn't, all walk-forward (`src/analysis.py`). The signal is not
+  transfer anticipation (stayers are ranked better than movers). Market-wide
+  drift is real and the model has been over-optimistic since the pandemic, but
+  it is only ~5% of the error. The market corrects players it under-values vs.
+  their stats but not the ones it over-values, except mildly above €20M.
+  Survivorship flatters the headline a little: counting players who left the
+  league, Spearman is ~0.565 rather than 0.59. The value-trend features work
+  through momentum at every price, read by the model as a step. Unchanged
+  valuations are common but near-random, so a hurdle model adds nothing.
+  Relegation is a proportional, predictable bias rather than a tail risk.
 
 ## Tests
 

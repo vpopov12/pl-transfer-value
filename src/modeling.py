@@ -10,13 +10,14 @@ from collections.abc import Iterable, Sequence
 import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.compose import ColumnTransformer, TransformedTargetRegressor
 from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import GridSearchCV, TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from xgboost import XGBRegressor
+from xgboost import XGBClassifier, XGBRegressor
 
 from src.panel import HORIZON_TOLERANCE_DAYS
 
@@ -74,6 +75,54 @@ MODEL_FACTORIES = {
     # handful of extreme breakouts pull the fit less than under plain squared error.
     "xgboost_huber": lambda: XGBRegressor(objective="reg:pseudohubererror", huber_slope=1.0, **XGB_DEFAULTS),
 }
+
+
+class HurdleRegressor(BaseEstimator, RegressorMixin):
+    """Two-stage model for a target with a spike at exactly zero.
+
+    Many snapshots are followed by a re-valuation that leaves the value unchanged, so
+    the target is a mixture of "no change" and a continuous change. Stage one predicts
+    the probability the value moves at all; stage two predicts the size of the move on
+    the rows that did move. The prediction is their product, i.e. the expected change."""
+
+    def __init__(self, classifier=None, regressor=None):
+        self.classifier = classifier
+        self.regressor = regressor
+
+    def fit(self, X, y):
+        y = np.asarray(y)
+        moved = y != 0
+        self.regressor_ = self.regressor or XGBRegressor(**XGB_DEFAULTS)
+        if moved.all() or not moved.any():
+            # Degenerate target (no zeros, or nothing but zeros): no hurdle to model.
+            self.classifier_ = None
+            self.constant_proba_ = float(moved.mean())
+            self.regressor_.fit(X, y)
+            return self
+        self.classifier_ = self.classifier or XGBClassifier(**XGB_DEFAULTS)
+        self.classifier_.fit(X, moved.astype(int))
+        self.regressor_.fit(X[moved], y[moved])
+        return self
+
+    def predict_proba_moved(self, X):
+        if self.classifier_ is None:
+            return np.full(X.shape[0], self.constant_proba_)
+        return self.classifier_.predict_proba(X)[:, 1]
+
+    def predict(self, X):
+        return self.predict_proba_moved(X) * self.regressor_.predict(X)
+
+
+# Not part of the default comparison (so notebooks 02/04 keep their model set), but
+# usable anywhere a model name is accepted; evaluated walk-forward in notebook 06.
+EXPERIMENTAL_MODEL_FACTORIES = {"hurdle": lambda: HurdleRegressor()}
+
+
+def model_factory(name: str):
+    if name in MODEL_FACTORIES:
+        return MODEL_FACTORIES[name]
+    return EXPERIMENTAL_MODEL_FACTORIES[name]
+
 
 # Small grids searched by `tune_model` with time-ordered cross-validation. Kept small on
 # purpose: each combination is a full fit, and the walk-forward backtest refits at every
@@ -196,7 +245,7 @@ def tune_model(
     Returns the refitted best pipeline and its chosen parameters (estimator names)."""
     grid = PARAM_GRIDS.get(model_name, {})
     train = train.sort_values("snapshot_date")
-    pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform, numeric_features)
+    pipeline = build_pipeline(model_factory(model_name)(), target_transform, numeric_features)
     columns = feature_columns(numeric_features)
     y_train = _clip_target(train[target_column(months)], clip)
     if not grid:
@@ -235,7 +284,7 @@ def fit_model(
             train, model_name, months, target_transform, clip, numeric_features=numeric_features
         )
         return pipeline
-    pipeline = build_pipeline(MODEL_FACTORIES[model_name](), target_transform, numeric_features)
+    pipeline = build_pipeline(model_factory(model_name)(), target_transform, numeric_features)
     y_train = _clip_target(train[target_column(months)], clip)
     pipeline.fit(train[feature_columns(numeric_features)], y_train)
     return pipeline

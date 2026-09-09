@@ -13,7 +13,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBRegressor
 
 from src.data_loader import PREMIER_LEAGUE_COMPETITION_ID
-from src.modeling import TARGET_CLIP, XGB_DEFAULTS, _backtest_metrics
+from src.modeling import TARGET_CLIP, XGB_DEFAULTS, _backtest_metrics, pipeline_feature_columns
 from src.panel import HORIZON_TOLERANCE_DAYS
 
 
@@ -203,4 +203,65 @@ def add_stats_only_residual(panel: pd.DataFrame, min_train_rows: int = 2000) -> 
     out = panel.copy()
     out["stats_only_log_value_pred"] = prediction
     out["stats_residual"] = df["log_value"] - prediction
+    return out
+
+
+def partial_dependence_by_group(
+    pipeline, rows: pd.DataFrame, feature: str, grid, group: pd.Series
+) -> pd.DataFrame:
+    """Average prediction as `feature` is swept over `grid`, separately for each group.
+
+    `rows` must already be prepared (see modeling.prepare_features); every other feature
+    keeps its real value, so the curve for a group shows what the fitted model does with
+    this one feature *for players like those in the group*."""
+    columns = pipeline_feature_columns(pipeline)
+    base = rows[columns].copy()
+    result = {}
+    for value in grid:
+        base[feature] = value
+        result[value] = (
+            pd.Series(pipeline.predict(base), index=rows.index).groupby(group.loc[rows.index]).mean()
+        )
+    return pd.DataFrame(result)
+
+
+def season_final_positions(games: pd.DataFrame) -> pd.DataFrame:
+    """Final league position per (season, club_id) from the last recorded matchday's
+    standing in the games table, Premier League only. Position 18-20 means relegated."""
+    pl = games[games["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID].copy()
+    pl["date"] = pd.to_datetime(pl["date"], errors="coerce")
+    long = pd.concat(
+        [
+            pl[["season", "date", "home_club_id", "home_club_position"]].rename(
+                columns={"home_club_id": "club_id", "home_club_position": "position"}
+            ),
+            pl[["season", "date", "away_club_id", "away_club_position"]].rename(
+                columns={"away_club_id": "club_id", "away_club_position": "position"}
+            ),
+        ]
+    ).dropna(subset=["position"])
+    last = long.sort_values("date").groupby(["season", "club_id"], as_index=False).last()
+    last["season_end"] = pd.to_datetime((last["season"] + 1).astype(str) + "-06-01")
+    last["relegated"] = last["position"] >= 18
+    return last[["season", "club_id", "position", "season_end", "relegated"]]
+
+
+def flag_relegation_in_window(
+    predictions: pd.DataFrame, final_positions: pd.DataFrame, months: int
+) -> pd.DataFrame:
+    """Mark each prediction with whether the player's club (as of the snapshot) was
+    relegated at the end of a season that finished inside the outcome window."""
+    window_days = HORIZON_TOLERANCE_DAYS[months]
+    keyed = predictions[["current_club_id", "snapshot_date"]].reset_index()
+    joined = keyed.merge(
+        final_positions[["club_id", "season_end", "relegated"]],
+        left_on="current_club_id",
+        right_on="club_id",
+        how="left",
+    )
+    window_end = joined["snapshot_date"] + pd.DateOffset(months=months) + pd.Timedelta(days=window_days)
+    in_window = (joined["season_end"] > joined["snapshot_date"]) & (joined["season_end"] <= window_end)
+    relegated = joined[in_window].groupby("index")["relegated"].any()
+    out = predictions.copy()
+    out["club_relegated_in_window"] = relegated.reindex(out.index).fillna(False).astype(bool)
     return out

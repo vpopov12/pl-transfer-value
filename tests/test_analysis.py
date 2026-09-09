@@ -7,9 +7,12 @@ import pytest
 from src.analysis import (
     add_stats_only_residual,
     augment_targets_with_other_leagues,
+    flag_relegation_in_window,
     flag_transfers_within_horizon,
     grouped_backtest_metrics,
     market_drift_decomposition,
+    partial_dependence_by_group,
+    season_final_positions,
 )
 
 
@@ -142,3 +145,59 @@ def test_stats_only_residual_only_uses_earlier_years() -> None:
     assert (out["stats_residual"] == np.log10(out["current_value_eur"]) - out["stats_only_log_value_pred"])[
         years >= 2016
     ].all()
+
+
+class _SumPipeline:
+    """Stub with the shape pipeline_feature_columns falls back on (uses FEATURE_COLUMNS)."""
+
+    def predict(self, X):
+        return X["age"].to_numpy() + X["trailing_minutes"].to_numpy()
+
+
+def test_partial_dependence_sweeps_one_feature_and_averages_per_group() -> None:
+    from src.modeling import FEATURE_COLUMNS
+
+    rows = pd.DataFrame({c: 0.0 for c in FEATURE_COLUMNS}, index=range(4))
+    rows["sub_position"], rows["foot"] = "x", "y"
+    rows["trailing_minutes"] = [10.0, 20.0, 100.0, 200.0]
+    group = pd.Series(["cheap", "cheap", "dear", "dear"], index=rows.index)
+
+    pdp = partial_dependence_by_group(_SumPipeline(), rows, "age", grid=[0, 5], group=group)
+
+    assert pdp.loc["cheap"].tolist() == [15.0, 20.0]
+    assert pdp.loc["dear"].tolist() == [150.0, 155.0]
+
+
+def test_season_final_positions_uses_last_matchday_and_marks_bottom_three() -> None:
+    games = pd.DataFrame(
+        {
+            "competition_id": ["GB1", "GB1", "GB1", "ES1"],
+            "season": [2022, 2022, 2022, 2022],
+            "date": ["2023-05-20", "2023-05-28", "2023-05-28", "2023-05-28"],
+            "home_club_id": [1, 1, 3, 9],
+            "away_club_id": [2, 3, 2, 8],
+            "home_club_position": [17, 18, 3, 1],  # club 1 slipped from 17th to 18th on the last day
+            "away_club_position": [2, 4, 1, 2],
+        }
+    )
+    final = season_final_positions(games).set_index("club_id")
+    assert final.loc[1, "position"] == 18 and bool(final.loc[1, "relegated"])
+    assert final.loc[2, "position"] == 1 and not bool(final.loc[2, "relegated"])
+    assert 9 not in final.index
+    assert final.loc[1, "season_end"] == _dt("2023-06-01")
+
+
+def test_flag_relegation_only_counts_seasons_ending_inside_the_window() -> None:
+    predictions = pd.DataFrame(
+        {
+            "current_club_id": [1, 1, 2],
+            "snapshot_date": [_dt("2023-01-01"), _dt("2023-07-01"), _dt("2023-01-01")],
+        },
+        index=[5, 6, 7],
+    )
+    final = pd.DataFrame(
+        {"club_id": [1, 2], "season_end": [_dt("2023-06-01"), _dt("2023-06-01")], "relegated": [True, False]}
+    )
+    out = flag_relegation_in_window(predictions, final, months=12)
+    # Club 1 relegated June 2023: inside the window for the Jan snapshot, before it for the July one.
+    assert out["club_relegated_in_window"].tolist() == [True, False, False]
