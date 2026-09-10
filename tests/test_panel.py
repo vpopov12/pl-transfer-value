@@ -10,6 +10,7 @@ from src.panel import (
     PANEL_SCHEMA_VERSION,
     _asof_cumulative,
     _career_cumulative_stats,
+    add_club_standing,
     add_horizon_targets,
     add_trailing_form,
     add_transfer_history,
@@ -289,3 +290,56 @@ def test_market_context_averages_league_wide_log_changes_in_the_trailing_window(
     assert result["market_trailing_12m_change"].iloc[2] == pytest.approx(0.0)
     # Oct 2021: both 2020 re-valuations are more than a year old; only the +25% remains.
     assert result["market_trailing_12m_change"].iloc[3] == pytest.approx(np.log(1.25))
+
+
+@pytest.fixture
+def games() -> pd.DataFrame:
+    """Club 100 plays two matches in 2023/24 (5th, then 18th) and one early in 2024/25 (2nd).
+    Club 200 plays once, mid-table."""
+    return pd.DataFrame(
+        {
+            "game_id": [1, 2, 3, 4],
+            "season": [2023, 2023, 2024, 2023],
+            "date": [_dt("2023-08-12"), _dt("2024-05-19"), _dt("2024-08-17"), _dt("2023-08-12")],
+            "home_club_id": [100, 100, 300, 200],
+            "away_club_id": [300, 300, 100, 300],
+            "home_club_position": [5, 18, 7, 10],
+            "away_club_position": [12, 3, 2, 11],
+        }
+    )
+
+
+def test_club_standing_uses_latest_match_on_or_before_snapshot(games: pd.DataFrame) -> None:
+    snapshots = pd.DataFrame(
+        {
+            "current_club_id": [100, 100, 100, 100],
+            "snapshot_date": [
+                _dt("2023-08-01"),  # before any match: unknown
+                _dt("2023-09-01"),  # after match 1 (5th, 1 of 38 played)
+                _dt("2024-06-15"),  # off-season, after the final matchday (18th)
+                _dt("2024-08-20"),  # new season, after one match (2nd)
+            ],
+        }
+    )
+    result = add_club_standing(snapshots, games)
+    assert result["club_league_position"].tolist() == [10.5, 5.0, 18.0, 2.0]
+    assert result["club_in_drop_zone"].tolist() == [0, 0, 1, 0]
+    assert result["club_season_progress"].tolist() == pytest.approx([0.0, 1 / 38, 2 / 38, 1 / 38])
+
+
+def test_club_standing_is_per_club_and_ignores_stale_seasons(games: pd.DataFrame) -> None:
+    snapshots = pd.DataFrame(
+        {
+            "current_club_id": [200, 200, 999],
+            "snapshot_date": [_dt("2023-09-01"), _dt("2025-06-01"), _dt("2023-09-01")],
+        }
+    )
+    result = add_club_standing(snapshots, games)
+    # club 200's own standing, not club 100's, on the shared match date
+    assert result.iloc[0]["club_league_position"] == 10.0
+    # club 200's only standing is almost two years old by mid-2025: treated as unknown
+    assert result.iloc[1]["club_league_position"] == 10.5
+    assert result.iloc[1]["club_season_progress"] == 0.0
+    # a club with no PL matches at all
+    assert result.iloc[2]["club_league_position"] == 10.5
+    assert result.iloc[2]["club_in_drop_zone"] == 0

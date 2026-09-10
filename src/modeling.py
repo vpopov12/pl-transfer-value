@@ -49,7 +49,13 @@ VALUE_TREND_FEATURES = [
 ROLE_FEATURES = ["trailing_cards_per90", "trailing_start_share"]
 # League-wide valuation drift over the trailing year; tested in notebook 06.
 MARKET_FEATURES = ["market_trailing_12m_change"]
-NUMERIC_FEATURES = BASE_NUMERIC_FEATURES + VALUE_TREND_FEATURES
+# The club's standing as of the snapshot: table position after its latest match, how far
+# through the season that is, and a drop-zone flag. Aimed at the relegation bias found in
+# notebook 06 section 7. Kept: walk-forward (notebook 05) it trims XGBoost MAE by 1-2%,
+# nudges Spearman up at both horizons, and cuts the excess over-prediction at clubs that
+# go down by about a third. Ridge is unchanged by it.
+CLUB_STANDING_FEATURES = ["club_league_position", "club_season_progress", "club_in_drop_zone"]
+NUMERIC_FEATURES = BASE_NUMERIC_FEATURES + VALUE_TREND_FEATURES + CLUB_STANDING_FEATURES
 CATEGORICAL_FEATURES = ["sub_position", "foot"]
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 

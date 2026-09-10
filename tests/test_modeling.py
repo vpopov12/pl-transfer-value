@@ -90,6 +90,9 @@ def test_predict_value_growth_computes_dollar_change_consistently() -> None:
             "value_vs_peak": [1.0],
             "trailing_cards_per90": [0.1],
             "trailing_start_share": [0.9],
+            "club_league_position": [8.0],
+            "club_season_progress": [0.5],
+            "club_in_drop_zone": [0],
             "months_to_contract_expiry": [18.0],
         }
     )
@@ -124,6 +127,9 @@ def test_predict_value_growth_drops_rows_missing_required_features() -> None:
             "value_vs_peak": [1.0, 1.0],
             "trailing_cards_per90": [0.1, 0.1],
             "trailing_start_share": [0.9, 0.9],
+            "club_league_position": [8.0, 8.0],
+            "club_season_progress": [0.5, 0.5],
+            "club_in_drop_zone": [0, 0],
         }
     )
     result = predict_value_growth(_StubPipeline(0.1), current_players)
@@ -164,6 +170,9 @@ def _synthetic_panel(n_players: int = 40, n_dates: int = 30, seed: int = 0) -> p
                     "value_vs_peak": rng.uniform(0.5, 1.0),
                     "trailing_cards_per90": rng.uniform(0, 0.3),
                     "trailing_start_share": rng.uniform(0, 1),
+                    "club_league_position": rng.uniform(1, 20),
+                    "club_season_progress": rng.uniform(0, 1),
+                    "club_in_drop_zone": int(rng.uniform() < 0.15),
                     "value_change_12m_pct": 0.5 * goals_per90 - 0.02 * (age - 24) + rng.normal(0, 0.05),
                 }
             )

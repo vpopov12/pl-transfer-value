@@ -72,7 +72,9 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   by a few thousandths and worsens calibration, so the hard-coded defaults are
   kept and tuning stays opt-in. A feature ablation shows the value-trend
   features lift 12-month Spearman from ~0.56 to ~0.59 (and 0.58 to 0.66 at 3
-  months), while cards and start-share add nothing.
+  months), the club-standing features (table position after the club's latest
+  match, point in the season, drop-zone flag) trim XGBoost's MAE by a further
+  1-2%, and cards and start-share add nothing.
 
 - `notebooks/06_why_it_works.ipynb` — asks *why* the growth model works and
   when it doesn't, all walk-forward (`src/analysis.py`). The signal is not
@@ -81,10 +83,11 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   it is only ~5% of the error. The market corrects players it under-values vs.
   their stats but not the ones it over-values, except mildly above €20M.
   Survivorship flatters the headline a little: counting players who left the
-  league, Spearman is ~0.565 rather than 0.59. The value-trend features work
+  league, Spearman is ~0.57 rather than 0.59. The value-trend features work
   through momentum at every price, read by the model as a step. Unchanged
   valuations are common but near-random, so a hurdle model adds nothing.
-  Relegation is a proportional, predictable bias rather than a tail risk.
+  Relegation is a proportional, predictable bias rather than a tail risk;
+  the club-standing features remove about a third of it.
 
 ## Tests
 

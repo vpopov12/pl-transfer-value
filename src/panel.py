@@ -24,7 +24,7 @@ from src.data_loader import (
 
 # Bump whenever the panel's columns or their semantics change, so stale parquet
 # caches built from an older feature set are ignored rather than silently reused.
-PANEL_SCHEMA_VERSION = 3
+PANEL_SCHEMA_VERSION = 4
 PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
 
 HORIZONS_MONTHS = (3, 6, 9, 12)
@@ -33,6 +33,13 @@ TRAILING_WINDOW_DAYS = 365
 # every 150-190 days on average, so a tight window around a 3-month target
 # would match almost nothing.
 HORIZON_TOLERANCE_DAYS = {3: 40, 6: 70, 9: 110, 12: 150}
+# Mid-table in a 20-team league: the default club position when nothing is known.
+NEUTRAL_LEAGUE_POSITION = 10.5
+MATCHES_PER_SEASON = 38
+DROP_ZONE_POSITION = 18
+# A club standing older than this is from a season the club did not play in the PL
+# (relegated then promoted, or the data ended); treat it as unknown rather than stale.
+MAX_STANDING_AGE_DAYS = 400
 
 CUM_COLS = [
     "cum_goals",
@@ -61,9 +68,20 @@ def load_valuations(data_dir: Path) -> pd.DataFrame:
 
 
 def load_pl_games(data_dir: Path) -> pd.DataFrame:
-    games = pd.read_csv(data_dir / "games.csv")
-    games = games[games["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID]
-    return games[["game_id", "home_club_id", "away_club_id", "home_club_position", "away_club_position"]]
+    games = pd.read_csv(data_dir / "games.csv", low_memory=False)
+    games = games[games["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID].copy()
+    games["date"] = pd.to_datetime(games["date"], errors="coerce")
+    return games[
+        [
+            "game_id",
+            "season",
+            "date",
+            "home_club_id",
+            "away_club_id",
+            "home_club_position",
+            "away_club_position",
+        ]
+    ]
 
 
 def load_pl_appearances(data_dir: Path) -> pd.DataFrame:
@@ -73,7 +91,7 @@ def load_pl_appearances(data_dir: Path) -> pd.DataFrame:
     appearances["date"] = pd.to_datetime(appearances["date"], errors="coerce")
     appearances = appearances[appearances["competition_id"] == PREMIER_LEAGUE_COMPETITION_ID]
 
-    games = load_pl_games(data_dir)
+    games = load_pl_games(data_dir).drop(columns=["season", "date"])
     appearances = appearances.merge(games, on="game_id", how="left")
     appearances["club_position"] = np.where(
         appearances["player_club_id"] == appearances["home_club_id"],
@@ -165,7 +183,6 @@ def add_trailing_form(snapshots: pd.DataFrame, appearances: pd.DataFrame) -> pd.
     # Average league position of the player's club over the trailing window (1 = top of table),
     # a proxy for the strength of the team context the player's performance happened in.
     # With no trailing PL appearances, default to a neutral mid-table position (20-team league).
-    NEUTRAL_LEAGUE_POSITION = 10.5
     has_trailing_apps = snapshots["trailing_appearances"] > 0
     snapshots["trailing_avg_club_position"] = np.where(
         has_trailing_apps,
@@ -188,6 +205,60 @@ def add_trailing_form(snapshots: pd.DataFrame, appearances: pd.DataFrame) -> pd.
         (snapshots["trailing_starts"] / snapshots["trailing_appearances"]).clip(upper=1.0),
         0.0,
     )
+    return snapshots
+
+
+def club_standings_by_date(games: pd.DataFrame) -> pd.DataFrame:
+    """One row per (club_id, match date): the club's league position after that match and
+    how many matches it had played in that season, from the PL games table."""
+    long = pd.concat(
+        [
+            games[["season", "date", "home_club_id", "home_club_position"]].rename(
+                columns={"home_club_id": "club_id", "home_club_position": "position"}
+            ),
+            games[["season", "date", "away_club_id", "away_club_position"]].rename(
+                columns={"away_club_id": "club_id", "away_club_position": "position"}
+            ),
+        ]
+    ).dropna(subset=["club_id", "date", "position"])
+    long = long.sort_values(["club_id", "season", "date"])
+    long["matches_played"] = long.groupby(["club_id", "season"]).cumcount() + 1
+    return long.sort_values("date").reset_index(drop=True)
+
+
+def add_club_standing(snapshots: pd.DataFrame, games: pd.DataFrame) -> pd.DataFrame:
+    """Add the club's league standing as of each snapshot, strictly backward-looking:
+    its position after its most recent PL match, how far through that season the
+    standing is (matches played / 38, so 1.0 in the off-season means the final table),
+    and whether it sat in the relegation zone.
+
+    Relegation is a discontinuity the trailing-average club position can't see (notebook
+    06, section 7): a good player at a club that goes down loses value regardless of
+    their own output. Clubs with no PL standing in the past year (newly promoted, or
+    before the games data begins) get a neutral mid-table default."""
+    snapshots = snapshots.copy()
+    standings = club_standings_by_date(games)[["club_id", "date", "position", "matches_played"]]
+
+    ordered = snapshots[["current_club_id", "snapshot_date"]].sort_values("snapshot_date").reset_index()
+    merged = pd.merge_asof(
+        ordered,
+        standings,
+        left_on="snapshot_date",
+        right_on="date",
+        left_by="current_club_id",
+        right_by="club_id",
+        direction="backward",
+    )
+    merged = merged.set_index("index").reindex(snapshots.index)
+
+    age_days = (snapshots["snapshot_date"] - merged["date"]).dt.days
+    known = merged["position"].notna() & (age_days <= MAX_STANDING_AGE_DAYS)
+    position = merged["position"].where(known)
+    snapshots["club_league_position"] = position.fillna(NEUTRAL_LEAGUE_POSITION)
+    snapshots["club_season_progress"] = (
+        (merged["matches_played"] / MATCHES_PER_SEASON).clip(upper=1.0).where(known).fillna(0.0)
+    )
+    snapshots["club_in_drop_zone"] = (position >= DROP_ZONE_POSITION).astype(int)
     return snapshots
 
 
@@ -358,6 +429,7 @@ def build_snapshot_panel(cache: bool = True) -> pd.DataFrame:
 def _build_snapshot_panel_from_raw(data_dir: Path) -> pd.DataFrame:
     players = load_players(data_dir)
     valuations = load_valuations(data_dir)
+    games = load_pl_games(data_dir)
     appearances = load_pl_appearances(data_dir)
     appearances = appearances.merge(load_pl_starts(data_dir), on=["game_id", "player_id"], how="left")
     appearances["started"] = appearances["started"].fillna(0).astype(int)
@@ -367,6 +439,7 @@ def _build_snapshot_panel_from_raw(data_dir: Path) -> pd.DataFrame:
         columns={"date": "snapshot_date", "market_value_in_eur": "current_value_eur"}
     )
     snapshots = add_trailing_form(snapshots, appearances)
+    snapshots = add_club_standing(snapshots, games)
     snapshots = add_value_trend(snapshots)
     snapshots = add_market_context(snapshots)
     snapshots = add_transfer_history(snapshots, transfers)
