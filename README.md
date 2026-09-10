@@ -33,6 +33,22 @@ uv run python -m src.data_refresh            # report dataset version and latest
 uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newest version
 ```
 
+## Frozen forecasts
+
+`forecasts/` holds the forward predictions frozen at a point in time, one CSV per
+run (`forward_<as-of date>_data<dataset version>.csv`): every player's latest
+snapshot, the default XGBoost prediction at each horizon, a 10-90% quantile band,
+and the date by which the outcome can be matched. Because the files are tracked
+in git, they can't be quietly revised after the fact. Once the dataset has been
+re-scraped past those due dates, the scorer matches each row against the new
+valuations (in any league, exactly as the panel does) and reports true
+out-of-sample accuracy per horizon:
+
+```
+uv run python -m src.forecast            # freeze today's predictions
+uv run python -m src.forecast --score    # score every frozen file against the data
+```
+
 ## Notebooks
 
 - `notebooks/01_eda.ipynb` — distribution of market value, value vs. age,

@@ -92,9 +92,12 @@ def main() -> None:
     new_months = months_of_new_outcomes(status, panel_max)
     print(f"cached panel extends to:   {panel_max.date()}")
     if new_months == 0:
-        print("new outcomes since panel:  none - notebook 02's predictions can't be checked yet")
+        print("new outcomes since panel:  none - the frozen forecasts can't be scored yet")
     else:
-        print(f"new outcomes since panel:  {new_months:.1f} months - rebuild the panel with cache=False")
+        print(
+            f"new outcomes since panel:  {new_months:.1f} months - rebuild the panel with cache=False "
+            "and run `python -m src.forecast --score`"
+        )
 
 
 if __name__ == "__main__":
