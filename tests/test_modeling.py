@@ -394,3 +394,60 @@ def test_fit_model_accepts_experimental_hurdle_by_name() -> None:
     train = modelable_rows(panel, months=12)
     pipeline = fit_model(train, "hurdle", months=12)
     assert predict_value_growth(pipeline, train.head(5)).shape[0] == 5
+
+
+def test_recency_weights_halve_every_half_life_and_cap_at_one() -> None:
+    from src.modeling import recency_weights
+
+    dates = pd.Series(pd.to_datetime(["2024-01-01", "2022-01-01", "2020-01-01", "2025-01-01"]))
+    weights = recency_weights(dates, pd.Timestamp("2024-01-01"), half_life_years=2.0)
+    assert weights[0] == pytest.approx(1.0)
+    assert weights[1] == pytest.approx(0.5, abs=0.01)
+    assert weights[2] == pytest.approx(0.25, abs=0.01)
+    assert weights[3] == pytest.approx(1.0)  # dated after as_of: never up-weighted
+
+
+def test_fit_model_with_recency_weighting_follows_the_recent_regime() -> None:
+    # The target's relationship to goals_per90 flips sign in the later half of the panel.
+    from src.modeling import fit_model, modelable_rows
+
+    panel = modelable_rows(_synthetic_panel(n_players=40, n_dates=30), months=12)
+    late = panel["snapshot_date"] >= panel["snapshot_date"].quantile(0.5)
+    panel.loc[late, "value_change_12m_pct"] = -panel.loc[late, "value_change_12m_pct"]
+    probe = panel[late].tail(50)
+
+    unweighted = fit_model(panel, "ridge", months=12)
+    weighted = fit_model(panel, "ridge", months=12, recency_half_life_years=0.5)
+    actual = probe["value_change_12m_pct"]
+    corr_unweighted = np.corrcoef(unweighted.predict(probe[FEATURE_COLUMNS]), actual)[0, 1]
+    corr_weighted = np.corrcoef(weighted.predict(probe[FEATURE_COLUMNS]), actual)[0, 1]
+    assert corr_weighted > corr_unweighted
+    assert corr_weighted > 0.5
+
+
+def test_hurdle_regressor_accepts_sample_weights_in_both_stages() -> None:
+    from xgboost import XGBClassifier, XGBRegressor
+
+    from src.modeling import HurdleRegressor
+
+    rng = np.random.default_rng(0)
+    X = pd.DataFrame({"x": rng.normal(size=200)})
+    y = np.where(rng.uniform(size=200) < 0.3, 0.0, X["x"].to_numpy() * 0.5)
+    weights = rng.uniform(0.5, 1.5, size=200)
+    model = HurdleRegressor(
+        classifier=XGBClassifier(n_estimators=20, max_depth=2),
+        regressor=XGBRegressor(n_estimators=20, max_depth=2),
+    )
+    model.fit(X, y, sample_weight=weights)
+    assert model.predict(X).shape == (200,)
+
+
+def test_recency_weighting_is_on_by_default_and_can_be_switched_off() -> None:
+    from src.modeling import DEFAULT_RECENCY_HALF_LIFE_YEARS, fit_model, modelable_rows
+
+    assert DEFAULT_RECENCY_HALF_LIFE_YEARS is not None
+    panel = modelable_rows(_synthetic_panel(n_players=30, n_dates=20), months=12)
+    default = fit_model(panel, "ridge", months=12)
+    unweighted = fit_model(panel, "ridge", months=12, recency_half_life_years=None)
+    probe = panel.tail(30)[FEATURE_COLUMNS]
+    assert not np.allclose(default.predict(probe), unweighted.predict(probe))

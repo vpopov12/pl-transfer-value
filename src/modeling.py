@@ -95,19 +95,20 @@ class HurdleRegressor(BaseEstimator, RegressorMixin):
         self.classifier = classifier
         self.regressor = regressor
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
         y = np.asarray(y)
         moved = y != 0
+        weight = None if sample_weight is None else np.asarray(sample_weight)
         self.regressor_ = self.regressor or XGBRegressor(**XGB_DEFAULTS)
         if moved.all() or not moved.any():
             # Degenerate target (no zeros, or nothing but zeros): no hurdle to model.
             self.classifier_ = None
             self.constant_proba_ = float(moved.mean())
-            self.regressor_.fit(X, y)
+            self.regressor_.fit(X, y, sample_weight=weight)
             return self
         self.classifier_ = self.classifier or XGBClassifier(**XGB_DEFAULTS)
-        self.classifier_.fit(X, moved.astype(int))
-        self.regressor_.fit(X[moved], y[moved])
+        self.classifier_.fit(X, moved.astype(int), sample_weight=weight)
+        self.regressor_.fit(X[moved], y[moved], sample_weight=None if weight is None else weight[moved])
         return self
 
     def predict_proba_moved(self, X):
@@ -161,6 +162,13 @@ TARGET_TRANSFORMS: dict[str, tuple] = {
 # log_ratio wins on every walk-forward metric (lower MAE, higher Spearman, calibration
 # slope ~1 instead of ~0.7), see notebook 05, so it is the default everywhere.
 DEFAULT_TARGET_TRANSFORM = "log_ratio"
+
+# Training rows are weighted by recency: a row this many years older than the latest
+# training snapshot counts half as much. Walk-forward (notebook 06, section 2) it trims
+# the post-2019 market bias and improves every 12-month score a little; at 3 months the
+# gain is large (XGBoost Spearman 0.66 -> 0.68), and shorter half-lives help more there.
+# None disables it.
+DEFAULT_RECENCY_HALF_LIFE_YEARS: float | None = 4.0
 
 
 def target_column(months: int) -> str:
@@ -243,6 +251,7 @@ def tune_model(
     clip: tuple[float, float] | None = TARGET_CLIP,
     n_splits: int = 3,
     numeric_features: Sequence[str] = NUMERIC_FEATURES,
+    recency_half_life_years: float | None = DEFAULT_RECENCY_HALF_LIFE_YEARS,
 ) -> tuple[object, dict[str, object]]:
     """Grid-search PARAM_GRIDS[model_name] with time-ordered CV on the training rows.
 
@@ -254,8 +263,9 @@ def tune_model(
     pipeline = build_pipeline(model_factory(model_name)(), target_transform, numeric_features)
     columns = feature_columns(numeric_features)
     y_train = _clip_target(train[target_column(months)], clip)
+    fit_params = _recency_fit_params(train, recency_half_life_years)
     if not grid:
-        pipeline.fit(train[columns], y_train)
+        pipeline.fit(train[columns], y_train, **fit_params)
         return pipeline, {}
 
     prefix = _model_param_prefix(pipeline)
@@ -266,9 +276,25 @@ def tune_model(
         scoring="neg_mean_absolute_error",
         n_jobs=-1,
     )
-    search.fit(train[columns], y_train)
+    search.fit(train[columns], y_train, **fit_params)
     best_params = {key.removeprefix(prefix): value for key, value in search.best_params_.items()}
     return search.best_estimator_, best_params
+
+
+def recency_weights(snapshot_date: pd.Series, as_of: pd.Timestamp, half_life_years: float) -> np.ndarray:
+    """Exponential time-decay sample weights: a row `half_life_years` older than `as_of`
+    counts half as much as one dated `as_of`. Lets a fit lean on the recent market
+    without discarding the older history outright."""
+    age_years = (as_of - snapshot_date).dt.days.to_numpy() / 365.25
+    return 0.5 ** (np.clip(age_years, 0, None) / half_life_years)
+
+
+def _recency_fit_params(train: pd.DataFrame, half_life_years: float | None) -> dict[str, np.ndarray]:
+    """Pipeline fit kwargs carrying recency weights to the final estimator, or nothing."""
+    if half_life_years is None:
+        return {}
+    weights = recency_weights(train["snapshot_date"], train["snapshot_date"].max(), half_life_years)
+    return {"model__sample_weight": weights}
 
 
 def fit_model(
@@ -279,20 +305,30 @@ def fit_model(
     clip: tuple[float, float] | None = TARGET_CLIP,
     tune: bool = False,
     numeric_features: Sequence[str] = NUMERIC_FEATURES,
+    recency_half_life_years: float | None = DEFAULT_RECENCY_HALF_LIFE_YEARS,
 ):
     """Fit one named model on already-prepared training rows for the given horizon.
 
     With `tune=True` the hyper-parameters come from `tune_model` instead of the
     hard-coded defaults in MODEL_FACTORIES. `numeric_features` narrows the inputs
-    (e.g. BASE_NUMERIC_FEATURES for an ablation)."""
+    (e.g. BASE_NUMERIC_FEATURES for an ablation). `recency_half_life_years` weights
+    rows by how recent they are (see `recency_weights`), measured from the latest
+    training snapshot; None weights every row equally."""
     if tune:
         pipeline, _ = tune_model(
-            train, model_name, months, target_transform, clip, numeric_features=numeric_features
+            train,
+            model_name,
+            months,
+            target_transform,
+            clip,
+            numeric_features=numeric_features,
+            recency_half_life_years=recency_half_life_years,
         )
         return pipeline
     pipeline = build_pipeline(model_factory(model_name)(), target_transform, numeric_features)
     y_train = _clip_target(train[target_column(months)], clip)
-    pipeline.fit(train[feature_columns(numeric_features)], y_train)
+    fit_params = _recency_fit_params(train, recency_half_life_years)
+    pipeline.fit(train[feature_columns(numeric_features)], y_train, **fit_params)
     return pipeline
 
 
@@ -302,14 +338,16 @@ def fit_quantile_models(
     quantiles: Sequence[float] = (0.1, 0.5, 0.9),
     target_transform: str = DEFAULT_TARGET_TRANSFORM,
     clip: tuple[float, float] | None = TARGET_CLIP,
+    recency_half_life_years: float | None = DEFAULT_RECENCY_HALF_LIFE_YEARS,
 ) -> dict[float, object]:
     """One XGBoost quantile regressor per requested quantile, for prediction intervals."""
     y_train = _clip_target(train[target_column(months)], clip)
+    fit_params = _recency_fit_params(train, recency_half_life_years)
     models = {}
     for q in quantiles:
         regressor = XGBRegressor(objective="reg:quantileerror", quantile_alpha=q, **XGB_DEFAULTS)
         pipeline = build_pipeline(regressor, target_transform)
-        pipeline.fit(train[FEATURE_COLUMNS], y_train)
+        pipeline.fit(train[FEATURE_COLUMNS], y_train, **fit_params)
         models[q] = pipeline
     return models
 
@@ -484,6 +522,7 @@ def walk_forward_backtest(
     clip: tuple[float, float] | None = TARGET_CLIP,
     tune: bool = False,
     numeric_features: Sequence[str] = NUMERIC_FEATURES,
+    recency_half_life_years: float | None = DEFAULT_RECENCY_HALF_LIFE_YEARS,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Repeat "train up to T, predict T + months, score against what actually happened"
     for several cutoff dates T and every named model.
@@ -513,7 +552,14 @@ def walk_forward_backtest(
             continue
         for name in model_names:
             pipeline = fit_model(
-                train, name, months, target_transform, clip, tune=tune, numeric_features=numeric_features
+                train,
+                name,
+                months,
+                target_transform,
+                clip,
+                tune=tune,
+                numeric_features=numeric_features,
+                recency_half_life_years=recency_half_life_years,
             )
             preds = predict_value_growth(pipeline, eval_rows)
             preds = preds.merge(

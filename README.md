@@ -87,27 +87,29 @@ uv run python -m src.forecast --score    # score every frozen file against the d
   `src/modeling.py`): at each cutoff the model trains only on outcomes that had
   fully resolved by then, predicts 12 months forward, and is scored against what
   really happened. Every model ranks players by future growth with a Spearman
-  correlation of ~0.55 at every cutoff and horizon (0.56 at 12 months, 0.66 at 3), and the players ranked in
+  correlation of ~0.55 at every cutoff and horizon (0.56 at 12 months, 0.68 at 3), and the players ranked in
   the top tenth rose several times more than average in every window. The
   notebook also tests fixes for the model's tendency to undersize big moves:
   fitting `log(future / current)` instead of raw % change fixes calibration
-  (slope ~1.0 vs ~0.75) and is now the project default, while Huber loss and
+  (slope ~1.1 vs ~0.8) and is now the project default, while Huber loss and
   looser clipping don't help. Quantile-regression 10-90% intervals cover ~75%
   of outcomes walk-forward, with the shortfall concentrated in the pandemic
   markdown of 2020. Time-ordered grid search of the hyper-parameters
   (`tune_model`) is also evaluated walk-forward: it changes MAE and Spearman
   by a few thousandths and worsens calibration, so the hard-coded defaults are
   kept and tuning stays opt-in. A feature ablation shows the value-trend
-  features lift 12-month Spearman from ~0.52 to ~0.56 (and 0.57 to 0.65 at 3
+  features lift 12-month Spearman from ~0.53 to ~0.56 (and 0.60 to 0.68 at 3
   months), the club-standing features (table position after the club's latest
-  match, point in the season, drop-zone flag) trim XGBoost's MAE by a further
-  1-2%, and cards and start-share add nothing.
+  match, point in the season, drop-zone flag) trim XGBoost's 12-month MAE by a
+  further 1%, and cards and start-share add nothing.
 
 - `notebooks/06_why_it_works.ipynb` — asks *why* the growth model works and
   when it doesn't, all walk-forward (`src/analysis.py`). The signal is not
   transfer anticipation (stayers are ranked better than movers). Market-wide
   drift is real and the model has been over-optimistic since the pandemic, but
-  it is only ~5% of the error. The market corrects players it under-values vs.
+  it is only ~4% of the error; weighting training rows by recency (4-year
+  half-life, now the default) trims that bias and lifts 3-month Spearman from
+  0.66 to 0.68, where a trailing market-drift feature did not help. The market corrects players it under-values vs.
   their stats but not the ones it over-values, except mildly above €20M.
   Survivorship: outcomes are now matched in any league, and the players who
   leave the Premier League are the ones whose values fall; on a PL-only
@@ -115,7 +117,7 @@ uv run python -m src.forecast --score    # score every frozen file against the d
   through momentum at every price, read by the model as a step. Unchanged
   valuations are common but near-random, so a hurdle model adds nothing.
   Relegation is a proportional, predictable bias rather than a tail risk;
-  the club-standing features remove over 40% of it.
+  the club-standing features remove about a third of it.
 
 ## Tests
 
