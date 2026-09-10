@@ -343,3 +343,37 @@ def test_club_standing_is_per_club_and_ignores_stale_seasons(games: pd.DataFrame
     # a club with no PL matches at all
     assert result.iloc[2]["club_league_position"] == 10.5
     assert result.iloc[2]["club_in_drop_zone"] == 0
+
+
+def test_horizon_target_matches_any_league_and_records_where() -> None:
+    # Player 1 leaves for Serie A; the only valuation near the 12-month mark is Italian.
+    valuations = pd.DataFrame(
+        {
+            "player_id": [1, 1, 2, 4],
+            "date": [_dt("2023-01-01"), _dt("2024-01-10"), _dt("2024-01-10"), _dt("2024-01-10")],
+            "market_value_in_eur": [1_000_000, 3_000_000, 500_000, 200_000],
+            # player 4 is valued at a club outside every tracked league (blank competition)
+            "player_club_domestic_competition_id": ["GB1", "IT1", "GB1", None],
+        }
+    )
+    snapshots = pd.DataFrame(
+        {
+            "player_id": [1, 2, 3, 4],
+            "snapshot_date": [_dt("2023-01-01")] * 4,
+            "current_value_eur": [1_000_000, 1_000_000, 1_000_000, 1_000_000],
+        }
+    )
+    result = add_horizon_targets(snapshots, valuations)
+    assert result["value_change_12m_pct"].tolist()[:2] == pytest.approx([2.0, -0.5])
+    assert result["target_league_12m"].tolist()[:2] == ["IT1", "GB1"]
+    assert pd.isna(result.loc[2, "target_league_12m"])
+    assert pd.isna(result.loc[2, "value_change_12m_pct"])
+    assert result.loc[3, "target_league_12m"] == "untracked"
+    assert result.loc[3, "value_change_12m_pct"] == pytest.approx(-0.8)
+
+
+def test_horizon_target_has_no_league_column_when_valuations_carry_none(valuations: pd.DataFrame) -> None:
+    snapshots = pd.DataFrame(
+        {"player_id": [1], "snapshot_date": [_dt("2023-01-01")], "current_value_eur": [1_000_000]}
+    )
+    assert "target_league_12m" not in add_horizon_targets(snapshots, valuations)

@@ -24,7 +24,7 @@ from src.data_loader import (
 
 # Bump whenever the panel's columns or their semantics change, so stale parquet
 # caches built from an older feature set are ignored rather than silently reused.
-PANEL_SCHEMA_VERSION = 4
+PANEL_SCHEMA_VERSION = 5
 PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
 
 HORIZONS_MONTHS = (3, 6, 9, 12)
@@ -37,6 +37,9 @@ HORIZON_TOLERANCE_DAYS = {3: 40, 6: 70, 9: 110, 12: 150}
 NEUTRAL_LEAGUE_POSITION = 10.5
 MATCHES_PER_SEASON = 38
 DROP_ZONE_POSITION = 18
+# Marker for an outcome valuation recorded while the player's club was outside every
+# league Transfermarkt tracks (the raw file leaves the competition id blank).
+UNTRACKED_LEAGUE = "untracked"
 # A club standing older than this is from a season the club did not play in the PL
 # (relegated then promoted, or the data ended); treat it as unknown rather than stale.
 MAX_STANDING_AGE_DAYS = 400
@@ -53,18 +56,36 @@ CUM_COLS = [
 ]
 
 
-def load_valuations(data_dir: Path) -> pd.DataFrame:
+def load_all_valuations(data_dir: Path) -> pd.DataFrame:
+    """Every valuation Transfermarkt recorded, in any league, tagged with the domestic
+    competition the player's club was in at the time. Used to find *outcomes*: a player
+    who leaves the Premier League keeps being valued wherever they go."""
     valuations = pd.read_csv(data_dir / "player_valuations.csv")
     valuations["date"] = pd.to_datetime(valuations["date"], errors="coerce")
-    valuations = valuations[
-        valuations["player_club_domestic_competition_id"] == PREMIER_LEAGUE_COMPETITION_ID
-    ]
     return (
-        valuations[["player_id", "date", "market_value_in_eur", "current_club_id", "current_club_name"]]
+        valuations[
+            [
+                "player_id",
+                "date",
+                "market_value_in_eur",
+                "current_club_id",
+                "current_club_name",
+                "player_club_domestic_competition_id",
+            ]
+        ]
         .dropna(subset=["player_id", "date", "market_value_in_eur"])
         .sort_values("date")
         .reset_index(drop=True)
     )
+
+
+def load_valuations(data_dir: Path) -> pd.DataFrame:
+    """Premier League valuations only: the snapshots (rows) of the panel."""
+    valuations = load_all_valuations(data_dir)
+    valuations = valuations[
+        valuations["player_club_domestic_competition_id"] == PREMIER_LEAGUE_COMPETITION_ID
+    ]
+    return valuations.drop(columns="player_club_domestic_competition_id").reset_index(drop=True)
 
 
 def load_pl_games(data_dir: Path) -> pd.DataFrame:
@@ -373,8 +394,15 @@ def add_transfer_history(snapshots: pd.DataFrame, transfers: pd.DataFrame) -> pd
 
 
 def add_horizon_targets(snapshots: pd.DataFrame, valuations: pd.DataFrame) -> pd.DataFrame:
-    """Add future_value / value_change (EUR and %) for each horizon in HORIZONS_MONTHS."""
+    """Add future_value / value_change (EUR and %) for each horizon in HORIZONS_MONTHS.
+
+    `valuations` should cover every league (see `load_all_valuations`), so that a player
+    who leaves the Premier League inside the horizon still has an outcome; matching only
+    against PL valuations silently dropped those players, and they are on average the
+    ones whose value fell (notebook 06, section 4). When the league column is present,
+    `target_league_{months}m` records where each outcome was found."""
     snapshots = snapshots.copy()
+    has_league = "player_club_domestic_competition_id" in valuations
     for months in HORIZONS_MONTHS:
         target_date_col = f"_target_date_{months}m"
         dated = snapshots[["player_id"]].copy()
@@ -398,6 +426,12 @@ def add_horizon_targets(snapshots: pd.DataFrame, valuations: pd.DataFrame) -> pd
         snapshots[f"value_change_{months}m_pct"] = (
             snapshots[f"value_change_{months}m_eur"] / snapshots["current_value_eur"]
         )
+        if has_league:
+            # Valuations at clubs outside any tracked league (B teams, under-21 sides,
+            # "Without Club") carry no competition id; they are still real outcomes.
+            league = merged["player_club_domestic_competition_id"].reindex(snapshots.index)
+            league = league.fillna(UNTRACKED_LEAGUE).where(future_value.notna())
+            snapshots[f"target_league_{months}m"] = league
     return snapshots
 
 
@@ -428,6 +462,7 @@ def build_snapshot_panel(cache: bool = True) -> pd.DataFrame:
 
 def _build_snapshot_panel_from_raw(data_dir: Path) -> pd.DataFrame:
     players = load_players(data_dir)
+    all_valuations = load_all_valuations(data_dir)
     valuations = load_valuations(data_dir)
     games = load_pl_games(data_dir)
     appearances = load_pl_appearances(data_dir)
@@ -443,7 +478,7 @@ def _build_snapshot_panel_from_raw(data_dir: Path) -> pd.DataFrame:
     snapshots = add_value_trend(snapshots)
     snapshots = add_market_context(snapshots)
     snapshots = add_transfer_history(snapshots, transfers)
-    snapshots = add_horizon_targets(snapshots, valuations)
+    snapshots = add_horizon_targets(snapshots, all_valuations)
     snapshots = add_contract_context(snapshots, players)
 
     snapshots = snapshots.merge(

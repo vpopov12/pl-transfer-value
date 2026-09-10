@@ -6,13 +6,14 @@ import pytest
 
 from src.analysis import (
     add_stats_only_residual,
-    augment_targets_with_other_leagues,
     flag_relegation_in_window,
     flag_transfers_within_horizon,
     grouped_backtest_metrics,
     market_drift_decomposition,
     partial_dependence_by_group,
+    pl_only_targets,
     season_final_positions,
+    target_source,
 )
 
 
@@ -88,33 +89,35 @@ def test_market_drift_decomposition_removes_a_uniform_bias_entirely() -> None:
     assert out["share_of_mae_from_market"].iloc[0] == pytest.approx(1.0)
 
 
-def test_augment_targets_fills_leavers_from_other_leagues_only() -> None:
-    panel = pd.DataFrame(
+def _panel_with_target_leagues() -> pd.DataFrame:
+    return pd.DataFrame(
         {
-            "player_id": [1, 2, 3],
-            "snapshot_date": [_dt("2020-01-01")] * 3,
-            "current_value_eur": [1e6, 2e6, 3e6],
-            "future_value_12m_eur": [1.5e6, np.nan, np.nan],
-            "value_change_12m_eur": [0.5e6, np.nan, np.nan],
-            "value_change_12m_pct": [0.5, np.nan, np.nan],
+            "player_id": [1, 2, 3, 4],
+            "snapshot_date": [_dt("2020-01-01")] * 4,
+            "current_value_eur": [1e6, 2e6, 3e6, 4e6],
+            "future_value_12m_eur": [1.5e6, 4e6, np.nan, 2e6],
+            "value_change_12m_eur": [0.5e6, 2e6, np.nan, -2e6],
+            "value_change_12m_pct": [0.5, 1.0, np.nan, -0.5],
+            "target_league_12m": ["GB1", "IT1", None, "untracked"],
         }
     )
-    valuations = pd.DataFrame(
-        {
-            "player_id": [2, 2, 3],
-            # player 2: Serie A valuation near the 12m mark; player 3: only a PL row (which the
-            # panel would already have matched if it were inside tolerance) -> stays "none".
-            "date": [_dt("2021-02-01"), _dt("2023-01-01"), _dt("2021-01-15")],
-            "market_value_in_eur": [4e6, 9e6, 5e6],
-            "player_club_domestic_competition_id": ["IT1", "IT1", "GB1"],
-        }
-    )
-    out = augment_targets_with_other_leagues(panel, valuations, months=12)
 
-    assert out["target_source_12m"].tolist() == ["pl", "other_league", "none"]
-    assert out["value_change_12m_pct"].tolist()[:2] == pytest.approx([0.5, 1.0])
-    assert np.isnan(out["value_change_12m_pct"].iloc[2])
-    assert out["future_league_12m"].tolist()[:2] == ["GB1", "IT1"]
+
+def test_target_source_labels_pl_other_league_and_none() -> None:
+    expected = ["pl", "other_league", "none", "untracked"]
+    assert target_source(_panel_with_target_leagues(), months=12).tolist() == expected
+
+
+def test_pl_only_targets_blanks_outcomes_found_abroad_and_nothing_else() -> None:
+    panel = _panel_with_target_leagues()
+    out = pl_only_targets(panel, months=12)
+    assert out.loc[0, "value_change_12m_pct"] == 0.5
+    assert np.isnan(out.loc[1, "value_change_12m_pct"])
+    assert np.isnan(out.loc[1, "future_value_12m_eur"])
+    assert np.isnan(out.loc[3, "value_change_12m_pct"])
+    assert target_source(out, months=12).tolist() == ["pl", "none", "none", "none"]
+    # the input is untouched
+    assert panel.loc[1, "value_change_12m_pct"] == 1.0
 
 
 def test_stats_only_residual_only_uses_earlier_years() -> None:

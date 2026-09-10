@@ -14,7 +14,7 @@ from xgboost import XGBRegressor
 
 from src.data_loader import PREMIER_LEAGUE_COMPETITION_ID
 from src.modeling import TARGET_CLIP, XGB_DEFAULTS, _backtest_metrics, pipeline_feature_columns
-from src.panel import HORIZON_TOLERANCE_DAYS
+from src.panel import HORIZON_TOLERANCE_DAYS, UNTRACKED_LEAGUE
 
 
 def flag_transfers_within_horizon(
@@ -100,53 +100,30 @@ def market_drift_decomposition(predictions: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def augment_targets_with_other_leagues(
-    panel: pd.DataFrame, valuations_all_leagues: pd.DataFrame, months: int
-) -> pd.DataFrame:
-    """Fill in horizon targets for players who left the Premier League, using their
-    valuation in whichever league they went to.
+def target_source(panel: pd.DataFrame, months: int) -> pd.Series:
+    """Where each snapshot's `months`-horizon outcome was found: "pl" (a Premier League
+    valuation), "other_league" (the player had left for another tracked league),
+    "untracked" (valued at a club outside every tracked league: a B team, a lower
+    division, or without a club), or "none" (never re-valued inside the window)."""
+    league = panel[f"target_league_{months}m"]
+    labels = np.select(
+        [league.isna(), league == PREMIER_LEAGUE_COMPETITION_ID, league == UNTRACKED_LEAGUE],
+        ["none", "pl", "untracked"],
+        default="other_league",
+    )
+    return pd.Series(labels, index=panel.index, name=f"target_source_{months}m")
 
-    The panel only matches targets against PL valuations, so a player who grows and moves
-    abroad has no outcome and silently drops out of every accuracy number. This adds a
-    `target_source_{months}m` column ("pl", "other_league", or "none") and fills the
-    future-value / change columns for the "other_league" rows so they can be evaluated.
 
-    `valuations_all_leagues` is the raw player_valuations table (dates parsed)."""
-    target_col = f"value_change_{months}m_pct"
-    future_col = f"future_value_{months}m_eur"
-    source_col = f"target_source_{months}m"
+def pl_only_targets(panel: pd.DataFrame, months: int) -> pd.DataFrame:
+    """The panel as it was before outcomes were matched across leagues: every outcome
+    found outside the Premier League (another league, or an untracked club) is blanked,
+    so the row drops out of training and evaluation exactly as it used to. For measuring
+    how much survivorship flattered the PL-only numbers."""
     out = panel.copy()
-    out[source_col] = np.where(out[target_col].notna(), "pl", "none")
-
-    abroad = valuations_all_leagues[
-        valuations_all_leagues["player_club_domestic_competition_id"] != PREMIER_LEAGUE_COMPETITION_ID
-    ][["player_id", "date", "market_value_in_eur", "player_club_domestic_competition_id"]].dropna()
-    abroad = abroad.sort_values("date")
-
-    unmatched = out[out[source_col] == "none"][["player_id", "snapshot_date"]].copy()
-    unmatched["target_date"] = unmatched["snapshot_date"] + pd.DateOffset(months=months)
-    ordered = unmatched.sort_values("target_date").reset_index()
-    found = pd.merge_asof(
-        ordered,
-        abroad,
-        left_on="target_date",
-        right_on="date",
-        by="player_id",
-        direction="nearest",
-        tolerance=pd.Timedelta(days=HORIZON_TOLERANCE_DAYS[months]),
-    ).set_index("index")
-    found = found[found["market_value_in_eur"].notna()]
-
-    out.loc[found.index, future_col] = found["market_value_in_eur"]
-    out.loc[found.index, f"value_change_{months}m_eur"] = (
-        found["market_value_in_eur"] - out.loc[found.index, "current_value_eur"]
-    )
-    out.loc[found.index, target_col] = (
-        out.loc[found.index, f"value_change_{months}m_eur"] / out.loc[found.index, "current_value_eur"]
-    )
-    out.loc[found.index, source_col] = "other_league"
-    out[f"future_league_{months}m"] = np.where(out[source_col] == "pl", PREMIER_LEAGUE_COMPETITION_ID, None)
-    out.loc[found.index, f"future_league_{months}m"] = found["player_club_domestic_competition_id"]
+    abroad = ~target_source(panel, months).isin(["pl", "none"])
+    for col in (f"future_value_{months}m_eur", f"value_change_{months}m_eur", f"value_change_{months}m_pct"):
+        out.loc[abroad, col] = np.nan
+    out.loc[abroad, f"target_league_{months}m"] = None
     return out
 
 

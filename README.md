@@ -15,7 +15,9 @@ uv run jupyter lab
 ```
 
 The Kaggle dataset is downloaded into `data/raw/` on first use via `kagglehub`.
-The valuation-snapshot panel used by notebooks 02-05 is cached as parquet in
+The valuation-snapshot panel used by notebooks 02-06 (one row per Premier League
+valuation, with outcomes matched against valuations in *any* league so players who
+leave the Premier League keep their outcome) is cached as parquet in
 `data/processed/` (keyed on dataset version and panel schema version), so
 re-opening a notebook reloads it in well under a second instead of rebuilding
 it from the raw CSVs. Pass `build_snapshot_panel(cache=False)` to force a rebuild.
@@ -60,7 +62,7 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   `src/modeling.py`): at each cutoff the model trains only on outcomes that had
   fully resolved by then, predicts 12 months forward, and is scored against what
   really happened. Every model ranks players by future growth with a Spearman
-  correlation of ~0.55-0.6 at every cutoff and horizon, and the players ranked in
+  correlation of ~0.55 at every cutoff and horizon (0.56 at 12 months, 0.66 at 3), and the players ranked in
   the top tenth rose several times more than average in every window. The
   notebook also tests fixes for the model's tendency to undersize big moves:
   fitting `log(future / current)` instead of raw % change fixes calibration
@@ -71,7 +73,7 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   (`tune_model`) is also evaluated walk-forward: it changes MAE and Spearman
   by a few thousandths and worsens calibration, so the hard-coded defaults are
   kept and tuning stays opt-in. A feature ablation shows the value-trend
-  features lift 12-month Spearman from ~0.56 to ~0.59 (and 0.58 to 0.66 at 3
+  features lift 12-month Spearman from ~0.52 to ~0.56 (and 0.57 to 0.65 at 3
   months), the club-standing features (table position after the club's latest
   match, point in the season, drop-zone flag) trim XGBoost's MAE by a further
   1-2%, and cards and start-share add nothing.
@@ -82,12 +84,13 @@ uv run python -m src.data_refresh --refresh  # force kagglehub to fetch the newe
   drift is real and the model has been over-optimistic since the pandemic, but
   it is only ~5% of the error. The market corrects players it under-values vs.
   their stats but not the ones it over-values, except mildly above €20M.
-  Survivorship flatters the headline a little: counting players who left the
-  league, Spearman is ~0.57 rather than 0.59. The value-trend features work
+  Survivorship: outcomes are now matched in any league, and the players who
+  leave the Premier League are the ones whose values fall; on a PL-only
+  evaluation the Spearman would read ~0.03 higher than the honest number. The value-trend features work
   through momentum at every price, read by the model as a step. Unchanged
   valuations are common but near-random, so a hurdle model adds nothing.
   Relegation is a proportional, predictable bias rather than a tail risk;
-  the club-standing features remove about a third of it.
+  the club-standing features remove over 40% of it.
 
 ## Tests
 
