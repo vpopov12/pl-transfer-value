@@ -1,8 +1,16 @@
 # pl-transfer-value
 
-Predict Premier League player transfer market value from performance and age
-using regression, comparing a linear baseline against regularized (Ridge/Lasso)
-and tree-based (XGBoost) models.
+Predict how a Premier League player's transfer market value will change over the
+next 3-12 months, from age, form, transfer history, the player's own valuation
+trajectory and their club's league standing, and test that prediction the way a
+scout would have used it: walk-forward, every six months from 2017 to 2025,
+training only on what was known at each date. The default XGBoost model ranks
+players by future growth with a Spearman correlation of about 0.56 at 12 months,
+and its top tenth rose several times more than the average player in every
+window. It is a good screening tool and a poor point forecast. Later notebooks
+ask why it works and where it fails (transfers, survivorship, relegation, market
+drift), and the forward predictions are frozen to a tracked file so they can be
+scored once new data arrives.
 
 ## Setup
 
@@ -70,9 +78,10 @@ uv run python -m src.forecast --score    # score every frozen file against the d
   club affiliation, nationality, or position (a data-grounded look at the
   "eye test" idea from football media, not a direct measurement of it).
 - `notebooks/04_fan_guide.ipynb` — plain-language tour of the headline
-  findings from the other three notebooks (no stats jargon), for a reader
-  who just wants the takeaways: prime age, what drives value, players
-  projected to rise, and the big-six value premium.
+  findings (no stats jargon), for a reader who just wants the takeaways: prime
+  age, what drives value, the frozen list of players projected to rise, how the
+  model's picks held up when tested against the past, where it fails, and the
+  big-six value premium.
 - `notebooks/05_backtest.ipynb` — a walk-forward backtest repeated at every
   six months from mid-2017 to early 2025 (`walk_forward_backtest` in
   `src/modeling.py`): at each cutoff the model trains only on outcomes that had
