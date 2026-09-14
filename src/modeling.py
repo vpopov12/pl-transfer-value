@@ -55,6 +55,13 @@ MARKET_FEATURES = ["market_trailing_12m_change"]
 # nudges Spearman up at both horizons, and cuts the excess over-prediction at clubs that
 # go down by about a third. Ridge is unchanged by it.
 CLUB_STANDING_FEATURES = ["club_league_position", "club_season_progress", "club_in_drop_zone"]
+# Explicit direction of the last re-valuation. Notebook 06 section 5 found XGBoost reads
+# log_prev_value_ratio as a three-way step (cut / untouched / raised); these flags hand
+# the linear models that same step, which they cannot otherwise express. Tested and *not*
+# kept in the default set: walk-forward they lift ridge and lasso a lot (12-month Spearman
+# ~0.551 -> ~0.562, 3-month ~0.583-0.590 -> ~0.612) and leave XGBoost, the default model,
+# a shade worse. Kept available as direct evidence for the step reading; see notebook 05.
+TREND_STEP_FEATURES = ["prev_value_rose", "prev_value_fell"]
 NUMERIC_FEATURES = BASE_NUMERIC_FEATURES + VALUE_TREND_FEATURES + CLUB_STANDING_FEATURES
 CATEGORICAL_FEATURES = ["sub_position", "foot"]
 FEATURE_COLUMNS = NUMERIC_FEATURES + CATEGORICAL_FEATURES
@@ -183,6 +190,8 @@ def prepare_features(panel: pd.DataFrame) -> pd.DataFrame:
     # Previous change is heavy-tailed (a few +50,000% academy re-valuations); log the ratio.
     if "prev_value_change_pct" in df:
         df["log_prev_value_ratio"] = np.log1p(df["prev_value_change_pct"].clip(lower=-0.99))
+        df["prev_value_rose"] = (df["prev_value_change_pct"] > 0).astype(int)
+        df["prev_value_fell"] = (df["prev_value_change_pct"] < 0).astype(int)
     df["foot"] = df["foot"].fillna("unknown")
     df["sub_position"] = df["sub_position"].fillna("unknown")
     return df

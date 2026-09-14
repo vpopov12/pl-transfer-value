@@ -343,6 +343,22 @@ def test_prepare_features_logs_previous_value_ratio_when_present() -> None:
     assert result["log_prev_value_ratio"].tolist() == pytest.approx([np.log(2.0), np.log(0.5)])
 
 
+def test_prepare_features_flags_direction_of_last_revaluation() -> None:
+    panel = pd.DataFrame(
+        {
+            "current_value_eur": [1e6] * 3,
+            "age": [25.0] * 3,
+            "last_transfer_fee_eur": [0.0] * 3,
+            "foot": ["right"] * 3,
+            "sub_position": ["Centre-Back"] * 3,
+            "prev_value_change_pct": [0.5, 0.0, -0.3],
+        }
+    )
+    prepared = prepare_features(panel)
+    assert prepared["prev_value_rose"].tolist() == [1, 0, 0]
+    assert prepared["prev_value_fell"].tolist() == [0, 0, 1]
+
+
 def test_fit_model_can_be_restricted_to_a_feature_subset() -> None:
     from src.modeling import BASE_NUMERIC_FEATURES, fit_model, modelable_rows
 
