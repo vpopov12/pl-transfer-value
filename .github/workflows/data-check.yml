@@ -1,0 +1,45 @@
+name: Data check
+
+# Weekly: has the upstream Kaggle dataset been re-scraped past the frozen forecasts'
+# due dates? Downloads the current dataset, reports how far it extends, and scores
+# every frozen forecast file against it. The tables land in the job summary.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  score-forecasts:
+    runs-on: ubuntu-latest
+    env:
+      # Optional: the dataset is public and downloads anonymously; set these repo
+      # secrets only if Kaggle starts requiring a login.
+      KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+      KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (from lockfile)
+        run: uv sync --all-groups --locked
+
+      - name: Report dataset currency
+        run: |
+          {
+            echo "## Dataset currency"
+            echo '```'
+            uv run python -m src.data_refresh
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Score frozen forecasts
+        run: |
+          {
+            echo "## Frozen forecast scores"
+            echo '```'
+            uv run python -m src.forecast --score
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
