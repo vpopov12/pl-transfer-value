@@ -26,6 +26,9 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = "."
 testpaths = ["tests"]
+markers = [
+    "integration: needs a cached copy of the Kaggle dataset; skipped without one",
+]
 
 [tool.black]
 line-length = 110
