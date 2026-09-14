@@ -123,11 +123,23 @@ uv run python -m src.forecast --score    # score every frozen file against the d
 
 ## Tests
 
-Unit tests cover the pure transformation logic in `src/panel.py` and
-`src/modeling.py` (trailing-window math, horizon-target matching, feature
-prep) against small synthetic DataFrames — they don't download the Kaggle
-dataset, so they run in under a couple of seconds.
+Unit tests cover the pure transformation logic in `src/panel.py`,
+`src/modeling.py`, `src/analysis.py` and `src/forecast.py` (trailing-window
+math, horizon-target matching, feature prep, recency weighting, forecast
+scoring) against small synthetic DataFrames — they don't download the Kaggle
+dataset, so they run in about ten seconds.
 
 ```
 uv run pytest -x --tb=short
+```
+
+`tests/test_integration.py` additionally checks the seam the synthetic tests
+can't see: that the panel actually builds every column the models name, that
+each horizon has a usable target, and that features aren't silently constant
+or falling back to defaults. Those need a cached copy of the dataset and are
+skipped without one.
+
+```
+uv run pytest -m integration          # only the panel contract checks
+uv run pytest -m "not integration"    # only the fast offline tests
 ```
