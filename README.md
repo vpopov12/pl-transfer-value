@@ -23,12 +23,20 @@ uv run jupyter lab
 ```
 
 The Kaggle dataset is downloaded into `data/raw/` on first use via `kagglehub`.
-The valuation-snapshot panel used by notebooks 02-06 (one row per Premier League
+The valuation-snapshot panel used by notebooks 02-07 (one row per Premier League
 valuation, with outcomes matched against valuations in *any* league so players who
 leave the Premier League keep their outcome) is cached as parquet in
 `data/processed/` (keyed on dataset version and panel schema version), so
 re-opening a notebook reloads it in well under a second instead of rebuilding
 it from the raw CSVs. Pass `build_snapshot_panel(cache=False)` to force a rebuild.
+
+Walk-forward backtests are cached the same way once a notebook calls
+`enable_backtest_cache()` (notebooks 04-07 do), under `data/processed/backtests/`.
+Each result is keyed on the panel's contents and every argument that affects it,
+so re-running a notebook only recomputes what changed: notebook 06 goes from
+about four minutes to under twenty seconds. Bump `BACKTEST_CACHE_VERSION` in
+`src/modeling.py` after changing model code the key can't see, such as feature
+derivation or metrics. The cache is off by default, so tests never write to disk.
 
 ## Checking for new data
 
@@ -71,7 +79,11 @@ uv run python -m src.forecast --score    # score every frozen file against the d
   `log(future / current)` and, alongside age, form and transfer history, use
   the player's own valuation trajectory (last change, time since, value vs.
   career peak). Predictions come with a quantile-regression 10-90% range and
-  the player's contract expiry as context.
+  the player's contract expiry as context, and the top risers come with their
+  reasons: each prediction split into per-feature contributions
+  (`src/explain.py`, XGBoost's built-in TreeSHAP). The list turns out to be
+  mostly an age story, with youth pushing forecasts up and a high price pulling
+  them back.
 - `notebooks/03_eye_test.ipynb` — uses the gap between actual value and a
   stats-only model's prediction as a proxy for value not explained by
   measurable output, then checks whether that gap correlates with big-six
@@ -119,7 +131,17 @@ uv run python -m src.forecast --score    # score every frozen file against the d
   via `TREND_STEP_FEATURES`, lifts them and leaves XGBoost flat). Unchanged
   valuations are common but near-random, so a hurdle model adds nothing.
   Relegation is a proportional, predictable bias rather than a tail risk; the
-  club-standing features remove about a third of it.
+  club-standing features remove about a third of it. The evaluation set is
+  mostly freshly re-valued players, whom the model ranks better (0.58) than
+  those last valued six to nine months earlier (0.50), so the headline is
+  honest for real use but weaker for rarely re-valued players.
+- `notebooks/07_were_the_decisions_real.ipynb` — re-tests all thirteen
+  keep-or-drop decisions with a paired block bootstrap over cutoffs
+  (`paired_backtest_comparison` in `src/analysis.py`), because several rested on
+  gains far smaller than the metric's spread across cutoffs. Every decision
+  survives: even club standing's 0.005 Spearman gain is real at 12 months. The
+  one correction is that recency weighting's 12-month case is lower error, not
+  better ranking. Runs in seconds from the backtest cache.
 
 ## Tests
 
