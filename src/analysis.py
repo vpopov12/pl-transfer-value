@@ -127,6 +127,28 @@ def pl_only_targets(panel: pd.DataFrame, months: int) -> pd.DataFrame:
     return out
 
 
+# How stale a player's latest snapshot was at the cutoff it was evaluated from. The
+# walk-forward evaluation set is each player's most recent valuation as of the cutoff,
+# within a year, so players Transfermarkt re-values often are over-represented among the
+# fresh rows. Bucketing by age says whether that selection moves the headline.
+SNAPSHOT_AGE_BINS = [-1, 90, 180, 270, 366]
+SNAPSHOT_AGE_LABELS = ["0-3 months", "3-6 months", "6-9 months", "9-12 months"]
+
+
+def add_snapshot_age(predictions: pd.DataFrame) -> pd.DataFrame:
+    """Add `snapshot_age_days` (cutoff minus snapshot date) and a coarse age bucket.
+
+    A player whose valuation was refreshed the week before the cutoff is being predicted
+    from current information; one whose last valuation is eleven months old is not, and
+    is also a different kind of player, since Transfermarkt revisits expensive and active
+    players more often. Both effects push the same way, so the honest question is whether
+    the model's accuracy depends on which of the two it is looking at."""
+    out = predictions.copy()
+    out["snapshot_age_days"] = (out["cutoff"] - out["snapshot_date"]).dt.days
+    out["snapshot_age"] = pd.cut(out["snapshot_age_days"], bins=SNAPSHOT_AGE_BINS, labels=SNAPSHOT_AGE_LABELS)
+    return out
+
+
 STATS_ONLY_NUMERIC = [
     "age",
     "age_sq",

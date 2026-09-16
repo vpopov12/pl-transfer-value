@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from src.analysis import (
+    add_snapshot_age,
     add_stats_only_residual,
     flag_relegation_in_window,
     flag_transfers_within_horizon,
@@ -204,3 +205,32 @@ def test_flag_relegation_only_counts_seasons_ending_inside_the_window() -> None:
     out = flag_relegation_in_window(predictions, final, months=12)
     # Club 1 relegated June 2023: inside the window for the Jan snapshot, before it for the July one.
     assert out["club_relegated_in_window"].tolist() == [True, False, False]
+
+
+def test_add_snapshot_age_measures_staleness_at_the_cutoff_and_buckets_it() -> None:
+    predictions = pd.DataFrame(
+        {
+            "cutoff": [_dt("2021-01-01")] * 4,
+            "snapshot_date": [
+                _dt("2020-12-15"),  # 17 days -> 0-3 months
+                _dt("2020-09-01"),  # 122 days -> 3-6 months
+                _dt("2020-05-01"),  # 245 days -> 6-9 months
+                _dt("2020-01-20"),  # 347 days -> 9-12 months
+            ],
+        }
+    )
+    out = add_snapshot_age(predictions)
+
+    assert out["snapshot_age_days"].tolist() == [17, 122, 245, 347]
+    assert out["snapshot_age"].astype(str).tolist() == [
+        "0-3 months",
+        "3-6 months",
+        "6-9 months",
+        "9-12 months",
+    ]
+
+
+def test_add_snapshot_age_leaves_the_input_untouched() -> None:
+    predictions = pd.DataFrame({"cutoff": [_dt("2021-01-01")], "snapshot_date": [_dt("2020-12-15")]})
+    add_snapshot_age(predictions)
+    assert "snapshot_age_days" not in predictions
