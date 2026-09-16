@@ -5,7 +5,9 @@ backtest the whole pipeline walk-forward across many historical cutoff dates.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import hashlib
+from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -19,7 +21,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from xgboost import XGBClassifier, XGBRegressor
 
-from src.panel import HORIZON_TOLERANCE_DAYS
+from src.panel import HORIZON_TOLERANCE_DAYS, PROCESSED_DATA_DIR
 
 # The original feature set: current value, age, trailing on-pitch form, transfer history.
 BASE_NUMERIC_FEATURES = [
@@ -521,6 +523,70 @@ def _backtest_metrics(predicted: pd.Series, actual: pd.Series) -> dict[str, floa
     }
 
 
+# --------------------------------------------------------------------------------------
+# Backtest cache
+# --------------------------------------------------------------------------------------
+
+# Walk-forward backtests refit every model at every cutoff, and the notebooks run them
+# in loops (feature ablations, half-life sweeps, tuning grids), so a full notebook run
+# takes many minutes. With the cache enabled, each result is stored under a key built
+# from the panel's contents and every argument that affects the output, so re-running a
+# notebook only recomputes what actually changed.
+#
+# Bump BACKTEST_CACHE_VERSION whenever model code changes in a way the key can't see:
+# feature derivation in prepare_features, model factories, metrics, or the fit logic.
+BACKTEST_CACHE_VERSION = 1
+_backtest_cache_dir: Path | None = None
+
+
+def enable_backtest_cache(directory: Path | None = None) -> Path:
+    """Cache walk-forward results on disk (default: data/processed/backtests). Off by
+    default, so tests and library callers never write to disk unless they opt in."""
+    global _backtest_cache_dir
+    _backtest_cache_dir = Path(directory) if directory is not None else PROCESSED_DATA_DIR / "backtests"
+    _backtest_cache_dir.mkdir(parents=True, exist_ok=True)
+    return _backtest_cache_dir
+
+
+def disable_backtest_cache() -> None:
+    global _backtest_cache_dir
+    _backtest_cache_dir = None
+
+
+def _backtest_cache_key(kind: str, panel: pd.DataFrame, params: dict[str, object]) -> str:
+    """Stable key from the cache version, the model defaults, the panel's full contents,
+    and the call's arguments. Any change to any of them is a cache miss."""
+    digest = hashlib.sha256()
+    digest.update(f"{kind}|v{BACKTEST_CACHE_VERSION}|{sorted(XGB_DEFAULTS.items())!r}".encode())
+    digest.update(pd.util.hash_pandas_object(panel, index=True).to_numpy().tobytes())
+    digest.update(repr(sorted(panel.columns)).encode())
+    digest.update(repr(sorted(params.items())).encode())
+    return digest.hexdigest()[:32]
+
+
+def _cached(
+    kind: str, panel: pd.DataFrame, params: dict[str, object], names: Sequence[str], compute: Callable
+) -> tuple[pd.DataFrame, ...]:
+    """Return `compute()`'s DataFrames from disk when cached, otherwise compute and store."""
+    if _backtest_cache_dir is None:
+        return compute()
+    key = _backtest_cache_key(kind, panel, params)
+    paths = [_backtest_cache_dir / f"{kind}_{key}_{name}.parquet" for name in names]
+    if all(path.exists() for path in paths):
+        return tuple(pd.read_parquet(path) for path in paths)
+    frames = compute()
+    for frame, path in zip(frames, paths):
+        frame.to_parquet(path, index=False)
+    return frames
+
+
+def _cutoff_list(
+    panel: pd.DataFrame, months: int, cutoffs: Iterable[pd.Timestamp] | None
+) -> list[pd.Timestamp]:
+    resolved = default_backtest_cutoffs(panel, months) if cutoffs is None else cutoffs
+    return [pd.Timestamp(c) for c in resolved]
+
+
 def walk_forward_backtest(
     panel: pd.DataFrame,
     months: int,
@@ -546,9 +612,50 @@ def walk_forward_backtest(
         predictions: one row per (cutoff, model, player) with predicted and actual
             % change, for plotting and case studies.
     """
+    cutoff_list = _cutoff_list(panel, months, cutoffs)
+    params = dict(
+        months=months,
+        cutoffs=[c.isoformat() for c in cutoff_list],
+        model_names=list(model_names),
+        max_age_days=max_age_days,
+        target_transform=target_transform,
+        clip=clip,
+        tune=tune,
+        numeric_features=list(numeric_features),
+        recency_half_life_years=recency_half_life_years,
+    )
+
+    def compute() -> tuple[pd.DataFrame, pd.DataFrame]:
+        return _walk_forward_backtest_uncached(
+            panel,
+            months,
+            cutoff_list,
+            model_names,
+            max_age_days,
+            target_transform,
+            clip,
+            tune,
+            numeric_features,
+            recency_half_life_years,
+        )
+
+    metrics, predictions = _cached("backtest", panel, params, ("metrics", "predictions"), compute)
+    return metrics, predictions
+
+
+def _walk_forward_backtest_uncached(
+    panel: pd.DataFrame,
+    months: int,
+    cutoffs: list[pd.Timestamp],
+    model_names: Sequence[str],
+    max_age_days: int,
+    target_transform: str,
+    clip: tuple[float, float] | None,
+    tune: bool,
+    numeric_features: Sequence[str],
+    recency_half_life_years: float | None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     usable = modelable_rows(panel, months, numeric_features)
-    if cutoffs is None:
-        cutoffs = default_backtest_cutoffs(panel, months)
     target_col = target_column(months)
 
     metric_rows: list[dict[str, object]] = []
@@ -616,9 +723,35 @@ def walk_forward_interval_backtest(
     realised outcomes fell inside the [low, high] quantile band, and how wide was it?
 
     A well-calibrated 10-90 band should cover about 80% of outcomes."""
+    cutoff_list = _cutoff_list(panel, months, cutoffs)
+    params = dict(
+        months=months,
+        cutoffs=[c.isoformat() for c in cutoff_list],
+        quantiles=list(quantiles),
+        max_age_days=max_age_days,
+        target_transform=target_transform,
+    )
+
+    def compute() -> tuple[pd.DataFrame]:
+        return (
+            _walk_forward_interval_backtest_uncached(
+                panel, months, cutoff_list, quantiles, max_age_days, target_transform
+            ),
+        )
+
+    (result,) = _cached("interval", panel, params, ("coverage",), compute)
+    return result
+
+
+def _walk_forward_interval_backtest_uncached(
+    panel: pd.DataFrame,
+    months: int,
+    cutoffs: list[pd.Timestamp],
+    quantiles: Sequence[float],
+    max_age_days: int,
+    target_transform: str,
+) -> pd.DataFrame:
     usable = modelable_rows(panel, months)
-    if cutoffs is None:
-        cutoffs = default_backtest_cutoffs(panel, months)
     low_q, high_q = min(quantiles), max(quantiles)
     target_col = target_column(months)
 

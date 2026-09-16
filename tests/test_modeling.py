@@ -467,3 +467,76 @@ def test_recency_weighting_is_on_by_default_and_can_be_switched_off() -> None:
     unweighted = fit_model(panel, "ridge", months=12, recency_half_life_years=None)
     probe = panel.tail(30)[FEATURE_COLUMNS]
     assert not np.allclose(default.predict(probe), unweighted.predict(probe))
+
+
+@pytest.fixture
+def backtest_cache(tmp_path):
+    from src.modeling import disable_backtest_cache, enable_backtest_cache
+
+    directory = enable_backtest_cache(tmp_path / "backtests")
+    yield directory
+    disable_backtest_cache()
+
+
+def _small_backtest_args():
+    panel = _synthetic_panel(n_players=25, n_dates=24)
+    cutoffs = [pd.Timestamp("2020-01-01"), pd.Timestamp("2020-07-01")]
+    return panel, cutoffs
+
+
+def test_backtest_cache_returns_stored_result_without_refitting(backtest_cache, monkeypatch) -> None:
+    import src.modeling as modeling
+
+    panel, cutoffs = _small_backtest_args()
+    first_metrics, first_preds = modeling.walk_forward_backtest(
+        panel, months=12, cutoffs=cutoffs, model_names=("ridge",)
+    )
+    assert len(list(backtest_cache.glob("*.parquet"))) == 2
+
+    def refit_forbidden(*args, **kwargs):
+        raise AssertionError("cache miss: the backtest was recomputed")
+
+    monkeypatch.setattr(modeling, "_walk_forward_backtest_uncached", refit_forbidden)
+    metrics, preds = modeling.walk_forward_backtest(panel, months=12, cutoffs=cutoffs, model_names=("ridge",))
+    pd.testing.assert_frame_equal(metrics, first_metrics, check_dtype=False)
+    pd.testing.assert_frame_equal(preds, first_preds, check_dtype=False)
+
+
+def test_backtest_cache_misses_when_arguments_or_panel_change(backtest_cache) -> None:
+    from src.modeling import walk_forward_backtest
+
+    panel, cutoffs = _small_backtest_args()
+    walk_forward_backtest(panel, months=12, cutoffs=cutoffs, model_names=("ridge",))
+    walk_forward_backtest(panel, months=12, cutoffs=cutoffs, model_names=("lasso",))
+    walk_forward_backtest(
+        panel, months=12, cutoffs=cutoffs, model_names=("ridge",), recency_half_life_years=None
+    )
+    changed = panel.copy()
+    changed.loc[changed.index[0], "value_change_12m_pct"] += 1.0
+    walk_forward_backtest(changed, months=12, cutoffs=cutoffs, model_names=("ridge",))
+    # four distinct calls, each stored as a metrics + predictions pair
+    assert len(list(backtest_cache.glob("backtest_*.parquet"))) == 8
+
+
+def test_backtest_cache_is_off_by_default(tmp_path, monkeypatch) -> None:
+    import src.modeling as modeling
+
+    monkeypatch.setattr(modeling, "PROCESSED_DATA_DIR", tmp_path)
+    panel, cutoffs = _small_backtest_args()
+    modeling.walk_forward_backtest(panel, months=12, cutoffs=cutoffs, model_names=("ridge",))
+    assert not list(tmp_path.rglob("*.parquet"))
+
+
+def test_interval_backtest_is_cached_too(backtest_cache, monkeypatch) -> None:
+    import src.modeling as modeling
+
+    panel, cutoffs = _small_backtest_args()
+    first = modeling.walk_forward_interval_backtest(panel, months=12, cutoffs=cutoffs)
+
+    def refit_forbidden(*args, **kwargs):
+        raise AssertionError("cache miss: the interval backtest was recomputed")
+
+    monkeypatch.setattr(modeling, "_walk_forward_interval_backtest_uncached", refit_forbidden)
+    pd.testing.assert_frame_equal(
+        modeling.walk_forward_interval_backtest(panel, months=12, cutoffs=cutoffs), first, check_dtype=False
+    )
