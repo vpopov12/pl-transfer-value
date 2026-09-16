@@ -540,3 +540,12 @@ def test_interval_backtest_is_cached_too(backtest_cache, monkeypatch) -> None:
     pd.testing.assert_frame_equal(
         modeling.walk_forward_interval_backtest(panel, months=12, cutoffs=cutoffs), first, check_dtype=False
     )
+
+
+def test_backtest_cache_leaves_no_partial_files_behind(backtest_cache) -> None:
+    from src.modeling import walk_forward_backtest
+
+    panel, cutoffs = _small_backtest_args()
+    walk_forward_backtest(panel, months=12, cutoffs=cutoffs, model_names=("ridge",))
+    assert not list(backtest_cache.glob("*.tmp"))
+    assert len(list(backtest_cache.glob("*.parquet"))) == 2

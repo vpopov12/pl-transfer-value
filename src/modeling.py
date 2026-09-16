@@ -6,6 +6,7 @@ backtest the whole pipeline walk-forward across many historical cutoff dates.
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
@@ -576,7 +577,11 @@ def _cached(
         return tuple(pd.read_parquet(path) for path in paths)
     frames = compute()
     for frame, path in zip(frames, paths):
-        frame.to_parquet(path, index=False)
+        # Write then rename: a rename is atomic, so a notebook running in parallel never
+        # reads a half-written file under the final name.
+        partial = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        frame.to_parquet(partial, index=False)
+        os.replace(partial, path)
     return frames
 
 
