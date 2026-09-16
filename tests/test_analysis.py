@@ -11,6 +11,7 @@ from src.analysis import (
     flag_transfers_within_horizon,
     grouped_backtest_metrics,
     market_drift_decomposition,
+    paired_backtest_comparison,
     partial_dependence_by_group,
     pl_only_targets,
     season_final_positions,
@@ -234,3 +235,61 @@ def test_add_snapshot_age_leaves_the_input_untouched() -> None:
     predictions = pd.DataFrame({"cutoff": [_dt("2021-01-01")], "snapshot_date": [_dt("2020-12-15")]})
     add_snapshot_age(predictions)
     assert "snapshot_age_days" not in predictions
+
+
+def _metrics(values: list[float], start: str = "2017-01-01") -> pd.DataFrame:
+    cutoffs = pd.date_range(start, periods=len(values), freq="6MS")
+    return pd.DataFrame({"cutoff": cutoffs, "spearman": values, "mae": values})
+
+
+def test_paired_comparison_of_identical_runs_finds_nothing() -> None:
+    base = _metrics([0.5, 0.6, 0.55, 0.52, 0.58, 0.61])
+    result = paired_backtest_comparison(base, base.copy())
+    assert result["mean_improvement"] == 0.0
+    assert result["ci_low"] <= 0.0 <= result["ci_high"]
+    assert result["cutoffs_won"] == 0
+
+
+def test_paired_comparison_detects_a_small_consistent_gain_despite_large_swings() -> None:
+    # Levels swing by 0.2 between cutoffs, but the candidate is always 0.005 ahead:
+    # far below the spread, yet unmistakable once the comparison is paired.
+    rng = np.random.default_rng(1)
+    levels = 0.5 + rng.uniform(-0.1, 0.1, size=16)
+    base = _metrics(list(levels))
+    cand = _metrics(list(levels + 0.005 + rng.normal(0, 0.0005, size=16)))
+    result = paired_backtest_comparison(base, cand)
+    assert result["ci_low"] > 0
+    assert result["share_of_resamples_better"] > 0.99
+    assert result["cutoffs_won"] == 16
+
+
+def test_paired_comparison_does_not_call_noise_an_improvement() -> None:
+    rng = np.random.default_rng(2)
+    levels = 0.5 + rng.uniform(-0.1, 0.1, size=16)
+    base = _metrics(list(levels))
+    cand = _metrics(list(levels + rng.normal(0, 0.02, size=16)))
+    result = paired_backtest_comparison(base, cand)
+    assert result["ci_low"] < 0 < result["ci_high"]
+
+
+def test_paired_comparison_respects_metric_direction() -> None:
+    base = _metrics([0.50, 0.40, 0.45, 0.42])
+    lower_error = _metrics([0.48, 0.38, 0.43, 0.40])
+    result = paired_backtest_comparison(base, lower_error, metric="mae", higher_is_better=False)
+    assert result["mean_improvement"] > 0
+    assert result["cutoffs_won"] == 4
+
+
+def test_paired_comparison_rejects_mismatched_cutoffs_or_several_models() -> None:
+    with pytest.raises(ValueError, match="same cutoffs"):
+        paired_backtest_comparison(_metrics([0.5, 0.6]), _metrics([0.5, 0.6], start="2018-01-01"))
+    two_models = pd.concat([_metrics([0.5, 0.6]), _metrics([0.5, 0.6])])
+    with pytest.raises(ValueError, match="single model"):
+        paired_backtest_comparison(two_models, two_models.copy())
+
+
+def test_paired_comparison_is_reproducible_with_a_seed() -> None:
+    rng = np.random.default_rng(3)
+    base = _metrics(list(rng.uniform(0.4, 0.6, 12)))
+    cand = _metrics(list(rng.uniform(0.4, 0.6, 12)))
+    assert paired_backtest_comparison(base, cand, seed=7) == paired_backtest_comparison(base, cand, seed=7)

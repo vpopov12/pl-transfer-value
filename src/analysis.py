@@ -149,6 +149,58 @@ def add_snapshot_age(predictions: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def paired_backtest_comparison(
+    baseline: pd.DataFrame,
+    candidate: pd.DataFrame,
+    metric: str = "spearman",
+    higher_is_better: bool = True,
+    block_length: int = 3,
+    n_boot: int = 10_000,
+    seed: int = 0,
+) -> dict[str, float]:
+    """Is `candidate` really better than `baseline`, or is the gap noise?
+
+    Both inputs are `walk_forward_backtest` metrics for one model over the same cutoffs.
+    The comparison is *paired*: it looks at the per-cutoff difference, so the large
+    swings every model shares from one cutoff to the next (a hard year is hard for both)
+    cancel out, which makes it far more sensitive than comparing the two means against
+    their spread across cutoffs.
+
+    Cutoffs six months apart share most of their training data and their 12-month
+    outcome windows overlap, so they are not independent. A moving-block bootstrap
+    resamples runs of `block_length` consecutive cutoffs rather than single ones, which
+    keeps that dependence and gives honest, wider intervals.
+
+    Returns the mean improvement (positive = candidate better, whichever direction the
+    metric runs), a 95% interval for it, the bootstrap share of resamples in which the
+    candidate came out ahead, and how many individual cutoffs it won."""
+    a = baseline.set_index("cutoff")[metric].sort_index()
+    b = candidate.set_index("cutoff")[metric].sort_index()
+    if not a.index.equals(b.index):
+        raise ValueError("baseline and candidate must cover exactly the same cutoffs")
+    if a.index.has_duplicates:
+        raise ValueError("expected one row per cutoff: filter the metrics to a single model first")
+
+    diff = (b - a).to_numpy() if higher_is_better else (a - b).to_numpy()
+    n = len(diff)
+    block = max(1, min(block_length, n))
+    rng = np.random.default_rng(seed)
+    n_blocks = int(np.ceil(n / block))
+    starts = rng.integers(0, n - block + 1, size=(n_boot, n_blocks))
+    offsets = np.arange(block)
+    idx = (starts[:, :, None] + offsets).reshape(n_boot, -1)[:, :n]
+    boot_means = diff[idx].mean(axis=1)
+
+    return {
+        "mean_improvement": float(diff.mean()),
+        "ci_low": float(np.percentile(boot_means, 2.5)),
+        "ci_high": float(np.percentile(boot_means, 97.5)),
+        "share_of_resamples_better": float((boot_means > 0).mean()),
+        "cutoffs_won": int((diff > 0).sum()),
+        "cutoffs": n,
+    }
+
+
 STATS_ONLY_NUMERIC = [
     "age",
     "age_sq",
