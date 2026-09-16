@@ -217,20 +217,20 @@ def test_walk_forward_backtest_scores_each_cutoff_and_model_without_leakage() ->
     panel = _synthetic_panel()
     cutoffs = [pd.Timestamp("2020-06-01"), pd.Timestamp("2021-06-01")]
     metrics, predictions = walk_forward_backtest(
-        panel, months=12, cutoffs=cutoffs, model_names=("linear", "ridge")
+        panel, months=12, cutoffs=cutoffs, model_names=("lasso", "ridge")
     )
 
     assert len(metrics) == 4
-    assert set(metrics["model"]) == {"linear", "ridge"}
+    assert set(metrics["model"]) == {"lasso", "ridge"}
     assert set(metrics["cutoff"]) == set(cutoffs)
     # Each evaluation set is the latest snapshot per player as of the cutoff.
     for cutoff in cutoffs:
         assert (predictions.loc[predictions["cutoff"] == cutoff, "snapshot_date"] <= cutoff).all()
-    # The target is linear in the features, so even the plain linear model should rank players well.
+    # The target is linear in the features, so the linear models should rank players well.
     assert (metrics["spearman"] > 0.8).all()
     assert (metrics["n_train"] > 0).all()
     # Later cutoffs see strictly more training data.
-    by_cutoff = metrics[metrics["model"] == "linear"].sort_values("cutoff")
+    by_cutoff = metrics[metrics["model"] == "ridge"].sort_values("cutoff")
     assert by_cutoff["n_train"].is_monotonic_increasing
 
 
@@ -240,7 +240,7 @@ def test_summarize_backtest_aggregates_across_cutoffs() -> None:
     metrics = pd.DataFrame(
         {
             "cutoff": pd.to_datetime(["2020-06-01", "2021-06-01"] * 2),
-            "model": ["linear", "linear", "ridge", "ridge"],
+            "model": ["lasso", "lasso", "ridge", "ridge"],
             "n_train": [10, 20, 10, 20],
             "n_eval": [5, 5, 5, 5],
             "mae": [0.2, 0.4, 0.1, 0.3],
@@ -252,8 +252,8 @@ def test_summarize_backtest_aggregates_across_cutoffs() -> None:
         }
     )
     summary = summarize_backtest(metrics)
-    assert summary.index.tolist() == ["ridge", "linear"]  # sorted by mean spearman, best first
-    assert summary.loc["linear", ("mae", "mean")] == pytest.approx(0.3)
+    assert summary.index.tolist() == ["ridge", "lasso"]  # sorted by mean spearman, best first
+    assert summary.loc["lasso", ("mae", "mean")] == pytest.approx(0.3)
     assert summary.loc["ridge", "n_cutoffs"] == 2
 
 
@@ -262,8 +262,8 @@ def test_fit_model_with_log_ratio_target_predicts_on_pct_scale() -> None:
 
     panel = _synthetic_panel(n_players=30, n_dates=10)
     train = modelable_rows(panel, months=12)
-    pct_model = fit_model(train, "linear", months=12, target_transform="pct")
-    log_model = fit_model(train, "linear", months=12, target_transform="log_ratio")
+    pct_model = fit_model(train, "ridge", months=12, target_transform="pct")
+    log_model = fit_model(train, "ridge", months=12, target_transform="log_ratio")
 
     pct_pred = pct_model.predict(train[FEATURE_COLUMNS])
     log_pred = log_model.predict(train[FEATURE_COLUMNS])
@@ -306,9 +306,11 @@ def test_tune_model_returns_params_from_the_grid_and_skips_models_without_one() 
     panel = _synthetic_panel(n_players=30, n_dates=12)
     train = modelable_rows(panel, months=12)
 
-    linear, linear_params = tune_model(train, "linear", months=12)
-    assert linear_params == {}
-    assert linear.predict(train[FEATURE_COLUMNS]).shape == (len(train),)
+    # A model with no grid (the experimental hurdle model) is fitted as-is.
+    assert "hurdle" not in PARAM_GRIDS
+    hurdle, hurdle_params = tune_model(train, "hurdle", months=12)
+    assert hurdle_params == {}
+    assert hurdle.predict(train[FEATURE_COLUMNS]).shape == (len(train),)
 
     ridge, ridge_params = tune_model(train, "ridge", months=12, n_splits=2)
     assert set(ridge_params) == {"alpha"}
@@ -322,8 +324,8 @@ def test_train_horizon_models_reports_best_params_when_tuning() -> None:
     from src.modeling import train_horizon_models
 
     panel = _synthetic_panel(n_players=30, n_dates=12)
-    results = train_horizon_models(panel, months=12, tune=True, model_names=("linear", "ridge"))
-    assert results["linear"]["best_params"] == {}
+    results = train_horizon_models(panel, months=12, tune=True, model_names=("hurdle", "ridge"))
+    assert results["hurdle"]["best_params"] == {}
     assert "alpha" in results["ridge"]["best_params"]
     assert results["ridge"]["mae"] < 0.2
 
@@ -364,7 +366,7 @@ def test_fit_model_can_be_restricted_to_a_feature_subset() -> None:
 
     panel = _synthetic_panel(n_players=20, n_dates=8)
     train = modelable_rows(panel, months=12)
-    restricted = fit_model(train, "linear", months=12, numeric_features=BASE_NUMERIC_FEATURES)
+    restricted = fit_model(train, "ridge", months=12, numeric_features=BASE_NUMERIC_FEATURES)
     preds = predict_value_growth(restricted, train.head(10))
     assert len(preds) == 10
     used = restricted.regressor_.named_steps["preprocess"].transformers_[0][2]
@@ -549,3 +551,10 @@ def test_backtest_cache_leaves_no_partial_files_behind(backtest_cache) -> None:
     walk_forward_backtest(panel, months=12, cutoffs=cutoffs, model_names=("ridge",))
     assert not list(backtest_cache.glob("*.tmp"))
     assert len(list(backtest_cache.glob("*.parquet"))) == 2
+
+
+def test_linear_regression_is_no_longer_a_model_choice() -> None:
+    from src.modeling import MODEL_FACTORIES, PARAM_GRIDS, walk_forward_backtest
+
+    assert "linear" not in MODEL_FACTORIES and "linear" not in PARAM_GRIDS
+    assert walk_forward_backtest.__defaults__[1] == ("ridge", "lasso", "xgboost")

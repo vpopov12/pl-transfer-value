@@ -67,7 +67,7 @@ uv run python -m src.forecast --score    # score every frozen file against the d
 - `notebooks/02_value_growth_prediction.ipynb` — predicts value *change* over
   the next 3/6/9/12 months per player, using a panel of historical valuation
   snapshots with trailing performance features (`src/panel.py`) and the same
-  linear/Ridge/Lasso/XGBoost comparison (`src/modeling.py`). Models fit
+  Ridge/Lasso/XGBoost comparison (`src/modeling.py`). Models fit
   `log(future / current)` and, alongside age, form and transfer history, use
   the player's own valuation trajectory (last change, time since, value vs.
   career peak). Predictions come with a quantile-regression 10-90% range and
