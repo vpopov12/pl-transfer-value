@@ -77,6 +77,23 @@ seen: see [`forecasts/README.md`](forecasts/README.md). The weekly data-check wo
 opens a GitHub issue the first time a new dataset version gives any frozen prediction
 a real outcome.
 
+## When new data lands
+
+The weekly data-check workflow opens an issue when a new dataset version gives any
+frozen prediction a real outcome. Then, locally:
+
+```
+uv run python -m src.data_refresh --refresh   # fetch the new dataset version
+uv run python -m src.forecast --score         # score every frozen forecast
+uv run python -m src.forecast                 # freeze a new set from the new data
+scripts/run_notebooks.sh                      # re-run all notebooks in order
+```
+
+Report the scores against the rules in [`forecasts/README.md`](forecasts/README.md),
+whichever way they go. `scripts/run_notebooks.sh 05 06` re-runs only the named
+notebooks. Re-running also rewrites cell timestamps, so commit only the notebooks
+whose results actually changed and discard timestamp-only diffs with `git checkout`.
+
 ## Notebooks
 
 - `notebooks/01_eda.ipynb` — distribution of market value, value vs. age,
