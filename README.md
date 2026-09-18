@@ -23,6 +23,11 @@ uv run jupyter lab
 ```
 
 The Kaggle dataset is downloaded into `data/raw/` on first use via `kagglehub`.
+It is [Football Data from Transfermarkt](https://www.kaggle.com/datasets/davidcariboo/player-scores),
+published on Kaggle under **CC0 (public domain)**, which is what allows derived files
+such as the frozen forecasts to live in this public repository. The raw data itself is
+never committed. The underlying figures originate from Transfermarkt, whose own terms
+of use are separate from the Kaggle licence.
 The valuation-snapshot panel used by notebooks 02-07 (one row per Premier League
 valuation, with outcomes matched against valuations in *any* league so players who
 leave the Premier League keep their outcome) is cached as parquet in
