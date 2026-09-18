@@ -65,6 +65,13 @@ uv run python -m src.forecast            # freeze today's predictions
 uv run python -m src.forecast --score    # score every frozen file against the data
 ```
 
+Frozen files can't be overwritten, and once a file's first outcome is due not even
+`--force` will replace it. How the results will be judged, including the thresholds
+for calling them a success or a failure, was written down before any outcome was
+seen: see [`forecasts/README.md`](forecasts/README.md). The weekly data-check workflow
+opens a GitHub issue the first time a new dataset version gives any frozen prediction
+a real outcome.
+
 ## Notebooks
 
 - `notebooks/01_eda.ipynb` — distribution of market value, value vs. age,
