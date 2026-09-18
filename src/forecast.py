@@ -101,8 +101,44 @@ def forecast_path(as_of: pd.Timestamp, dataset_version: str) -> Path:
     return FORECAST_DIR / f"forward_{pd.Timestamp(as_of).date()}_data{dataset_version}.csv"
 
 
-def save_forward_predictions(predictions: pd.DataFrame, as_of: pd.Timestamp, dataset_version: str) -> Path:
+class FrozenForecastExistsError(FileExistsError):
+    """A frozen forecast file is already there and may not be replaced."""
+
+
+def check_can_write(path: Path, force: bool = False, today: pd.Timestamp | None = None) -> None:
+    """Refuse to replace a frozen forecast.
+
+    A frozen file is only worth anything if it can't be quietly revised once reality
+    starts answering it, so an existing file is never overwritten by default. `force`
+    exists for one legitimate case, fixing a file before any of its outcomes is due,
+    and is refused as soon as the earliest due date in the existing file has passed."""
+    if not path.exists():
+        return
+    if not force:
+        raise FrozenForecastExistsError(
+            f"{path.name} is already frozen and won't be overwritten. Frozen forecasts are "
+            "immutable; pass force=True (or --force) only if none of its outcomes is due yet."
+        )
+    first_due = pd.read_csv(path, usecols=["outcome_due_date"], parse_dates=["outcome_due_date"])[
+        "outcome_due_date"
+    ].min()
+    today = pd.Timestamp.today().normalize() if today is None else pd.Timestamp(today)
+    if today >= first_due:
+        raise FrozenForecastExistsError(
+            f"{path.name} can't be revised: its first outcomes were due on {first_due.date()}, "
+            "so it is locked even with force."
+        )
+
+
+def save_forward_predictions(
+    predictions: pd.DataFrame,
+    as_of: pd.Timestamp,
+    dataset_version: str,
+    force: bool = False,
+    today: pd.Timestamp | None = None,
+) -> Path:
     path = forecast_path(as_of, dataset_version)
+    check_can_write(path, force, today)
     path.parent.mkdir(parents=True, exist_ok=True)
     predictions.to_csv(path, index=False, date_format="%Y-%m-%d")
     return path
@@ -169,6 +205,11 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument("--score", action="store_true", help="score every frozen forecast instead")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing frozen file; refused once any of its outcomes is due",
+    )
     args = parser.parse_args()
 
     data_dir = download_dataset()
@@ -205,8 +246,13 @@ def main() -> None:
 
     panel = build_snapshot_panel()
     as_of = panel["snapshot_date"].max()
+    try:
+        # Check before the (slow) prediction step, so a locked file fails fast.
+        check_can_write(forecast_path(as_of, data_dir.name), args.force)
+    except FrozenForecastExistsError as err:
+        raise SystemExit(f"not written: {err}") from None
     predictions = make_forward_predictions(panel)
-    path = save_forward_predictions(predictions, as_of, data_dir.name)
+    path = save_forward_predictions(predictions, as_of, data_dir.name, force=args.force)
     per_horizon = predictions.groupby("horizon_months").size().to_dict()
     print(
         f"wrote {len(predictions):,} predictions to {path.relative_to(PROJECT_ROOT)} (as of {as_of.date()})"

@@ -4,8 +4,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from src.forecast import (
+    FrozenForecastExistsError,
     forecast_path,
     load_forecasts,
     make_forward_predictions,
@@ -129,3 +131,31 @@ def test_save_and_load_forecasts_round_trip(tmp_path: Path, monkeypatch) -> None
     assert loaded["forecast_file"].eq(path.name).all()
     assert loaded["snapshot_date"].dtype.kind == "M"
     assert len(loaded) == 3
+
+
+def _frozen(tmp_path: Path, monkeypatch) -> Path:
+    monkeypatch.setattr("src.forecast.FORECAST_DIR", tmp_path)
+    preds = _forecast().drop(columns="forecast_file")  # first outcome due 2026-10-11
+    return save_forward_predictions(preds, _dt("2026-06-01"), "679", today=_dt("2026-06-02"))
+
+
+def test_a_frozen_forecast_is_never_overwritten_by_default(tmp_path: Path, monkeypatch) -> None:
+    path = _frozen(tmp_path, monkeypatch)
+    original = path.read_bytes()
+    changed = _forecast().drop(columns="forecast_file").assign(predicted_pct_change=9.9)
+    with pytest.raises(FrozenForecastExistsError, match="already frozen"):
+        save_forward_predictions(changed, _dt("2026-06-01"), "679", today=_dt("2026-06-02"))
+    assert path.read_bytes() == original
+
+
+def test_force_can_fix_a_file_only_before_its_first_outcome_is_due(tmp_path: Path, monkeypatch) -> None:
+    path = _frozen(tmp_path, monkeypatch)
+    fixed = _forecast().drop(columns="forecast_file").assign(predicted_pct_change=0.2)
+    save_forward_predictions(fixed, _dt("2026-06-01"), "679", force=True, today=_dt("2026-10-10"))
+    assert (pd.read_csv(path)["predicted_pct_change"] == 0.2).all()
+
+    locked = path.read_bytes()
+    with pytest.raises(FrozenForecastExistsError, match="locked even with force"):
+        revised = fixed.assign(predicted_pct_change=0.5)
+        save_forward_predictions(revised, _dt("2026-06-01"), "679", force=True, today=_dt("2026-10-11"))
+    assert path.read_bytes() == locked
