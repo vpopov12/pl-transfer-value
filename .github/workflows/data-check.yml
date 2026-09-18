@@ -2,11 +2,26 @@ name: Data check
 
 # Weekly: has the upstream Kaggle dataset been re-scraped past the frozen forecasts'
 # due dates? Downloads the current dataset, reports how far it extends, and scores
-# every frozen forecast file against it. The tables land in the job summary.
+# every frozen forecast file against it. The tables land in the job summary, and the
+# first time a dataset version gives any frozen prediction a real outcome, the job
+# opens a GitHub issue so the result doesn't sit unnoticed in a run summary.
 on:
   schedule:
     - cron: "0 6 * * 1" # Mondays 06:00 UTC
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print the issue instead of opening it"
+        type: boolean
+        default: false
+      pretend_scoreable:
+        description: "Test the issue path as if outcomes had arrived (always a dry run)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   score-forecasts:
@@ -40,6 +55,33 @@ jobs:
           {
             echo "## Frozen forecast scores"
             echo '```'
-            uv run python -m src.forecast --score
+            uv run python -m src.forecast --score --summary-json score.json --issue-body issue.md
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Open an issue when frozen forecasts get real outcomes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRETEND: ${{ inputs.pretend_scoreable == true }}
+          DRY_RUN: ${{ inputs.dry_run == true || inputs.pretend_scoreable == true }}
+        run: |
+          resolved=$(jq -r .rows_resolved score.json)
+          version=$(jq -r .dataset_version score.json)
+          if [ "$resolved" = "0" ] && [ "$PRETEND" != "true" ]; then
+            echo "No frozen prediction has an outcome yet in dataset version $version; nothing to report."
+            exit 0
+          fi
+          title="Frozen forecasts can now be scored (dataset version $version)"
+          # One issue per dataset version, ever: closing it does not reopen it next week.
+          existing=$(gh issue list --state all --search "\"$title\" in:title" --json title \
+            --jq "[.[] | select(.title == \"$title\")] | length")
+          if [ "$existing" != "0" ]; then
+            echo "An issue titled '$title' already exists; not opening another."
+            exit 0
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: would open an issue titled '$title' with this body:"
+            cat issue.md
+            exit 0
+          fi
+          gh issue create --title "$title" --body-file issue.md

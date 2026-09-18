@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +15,8 @@ from src.forecast import (
     resolve_forecast_outcomes,
     save_forward_predictions,
     score_forecasts,
+    score_issue_markdown,
+    score_summary,
 )
 from src.panel import HORIZON_TOLERANCE_DAYS
 from tests.test_modeling import _synthetic_panel
@@ -159,3 +162,33 @@ def test_force_can_fix_a_file_only_before_its_first_outcome_is_due(tmp_path: Pat
         revised = fixed.assign(predicted_pct_change=0.5)
         save_forward_predictions(revised, _dt("2026-06-01"), "679", force=True, today=_dt("2026-10-11"))
     assert path.read_bytes() == locked
+
+
+def _scored_example() -> tuple[pd.DataFrame, pd.DataFrame]:
+    resolved = _forecast()
+    resolved["actual_pct_change"] = [0.6, 0.0, np.nan]
+    resolved["resolved"] = [True, True, False]
+    resolved["due"] = [True, False, False]
+    return resolved, score_forecasts(resolved)
+
+
+def test_score_summary_counts_resolved_rows_and_keeps_only_real_numbers() -> None:
+    resolved, scores = _scored_example()
+    summary = score_summary(resolved, scores, "681", _dt("2026-12-01"))
+    assert summary["dataset_version"] == "681"
+    assert summary["latest_valuation"] == "2026-12-01"
+    assert (summary["rows"], summary["rows_due"], summary["rows_resolved"]) == (3, 1, 2)
+    by_h = {row["horizon_months"]: row for row in summary["per_horizon"]}
+    assert by_h[12]["n"] == 2 and "spearman" in by_h[12]
+    assert "spearman" not in by_h[3]  # nothing resolved at 3 months: no NaN placeholders
+    json.dumps(summary)  # must be serialisable as-is
+
+
+def test_issue_markdown_reports_counts_and_marks_missing_scores() -> None:
+    resolved, scores = _scored_example()
+    body = score_issue_markdown(score_summary(resolved, scores, "681", _dt("2026-12-01")))
+    assert "**2 of 3** frozen predictions" in body
+    assert "| `f.csv` | 12m | 2 |" in body
+    three_month = next(line for line in body.splitlines() if "| 3m |" in line)
+    assert three_month.count("–") == 3  # spearman, mae and band coverage not yet available
+    assert "forecasts/README.md" in body

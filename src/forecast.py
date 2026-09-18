@@ -16,6 +16,7 @@ had resolved, predicts each player's latest snapshot, and records the prediction
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -200,6 +201,83 @@ def score_forecasts(resolved: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+SCORE_COLUMNS = [
+    "forecast_file",
+    "horizon_months",
+    "n",
+    "share_due",
+    "share_resolved",
+    "spearman",
+    "mae",
+    "calibration_slope",
+    "direction_accuracy",
+    "band_coverage",
+]
+
+
+def score_summary(
+    resolved: pd.DataFrame, scores: pd.DataFrame, dataset_version: str, latest_valuation: pd.Timestamp
+) -> dict[str, object]:
+    """Machine-readable result of a scoring run, for automation to act on.
+
+    `rows_resolved` is the trigger that matters: it counts frozen predictions that now have
+    a real outcome. It turns positive the first time a re-scraped dataset reaches past a
+    snapshot, before the full matching window has closed, so it is the earliest moment a
+    forecast can be checked at all."""
+    return {
+        "dataset_version": str(dataset_version),
+        "latest_valuation": pd.Timestamp(latest_valuation).date().isoformat(),
+        "rows": int(len(resolved)),
+        "rows_due": int(resolved["due"].sum()),
+        "rows_resolved": int(resolved["resolved"].sum()),
+        "per_horizon": [
+            {k: (round(v, 4) if isinstance(v, float) else v) for k, v in row.items() if pd.notna(v)}
+            for row in scores[[c for c in SCORE_COLUMNS if c in scores]].to_dict("records")
+        ],
+    }
+
+
+def score_issue_markdown(summary: dict[str, object]) -> str:
+    """Body for the GitHub issue opened when frozen forecasts first get real outcomes."""
+    lines = [
+        f"New Transfermarkt data (dataset version {summary['dataset_version']}, valuations to "
+        f"{summary['latest_valuation']}) gives real outcomes for "
+        f"**{summary['rows_resolved']:,} of {summary['rows']:,}** frozen predictions.",
+        "",
+        "| File | Horizon | Rows | Due | Resolved | Spearman | MAE | In 10-90% band |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+
+    def fmt(row: dict, key: str, pct: bool = False) -> str:
+        value = row.get(key)
+        if value is None:
+            return "–"
+        return f"{value:.0%}" if pct else f"{value:.3f}"
+
+    for row in summary["per_horizon"]:
+        cells = [
+            f"`{row['forecast_file']}`",
+            f"{row['horizon_months']}m",
+            str(row["n"]),
+            fmt(row, "share_due", True),
+            fmt(row, "share_resolved", True),
+            fmt(row, "spearman"),
+            fmt(row, "mae"),
+            fmt(row, "band_coverage", True),
+        ]
+        lines.append("| " + " | ".join(cells) + " |")
+    lines += [
+        "",
+        "Scores on horizons that are only partly resolved are provisional: early outcomes are the "
+        "players Transfermarkt re-valued first. Compare against the expectations recorded in "
+        "`forecasts/README.md`, and report the result whichever way it goes.",
+        "",
+        "Next: `uv run python -m src.forecast --score` locally, then freeze a new set with "
+        "`uv run python -m src.forecast`.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -210,6 +288,10 @@ def main() -> None:
         action="store_true",
         help="replace an existing frozen file; refused once any of its outcomes is due",
     )
+    parser.add_argument(
+        "--summary-json", type=Path, help="with --score: write a machine-readable summary here"
+    )
+    parser.add_argument("--issue-body", type=Path, help="with --score: write a markdown report here")
     args = parser.parse_args()
 
     data_dir = download_dataset()
@@ -223,23 +305,12 @@ def main() -> None:
         resolved = resolve_forecast_outcomes(forecasts, valuations)
         pd.set_option("display.width", 200)
         scores = score_forecasts(resolved)
-        show = [
-            c
-            for c in [
-                "forecast_file",
-                "horizon_months",
-                "n",
-                "share_due",
-                "share_resolved",
-                "spearman",
-                "mae",
-                "calibration_slope",
-                "direction_accuracy",
-                "band_coverage",
-            ]
-            if c in scores
-        ]
-        print(scores[show].round(3).to_string(index=False))
+        print(scores[[c for c in SCORE_COLUMNS if c in scores]].round(3).to_string(index=False))
+        summary = score_summary(resolved, scores, data_dir.name, valuations["date"].max())
+        if args.summary_json:
+            args.summary_json.write_text(json.dumps(summary, indent=1) + "\n")
+        if args.issue_body:
+            args.issue_body.write_text(score_issue_markdown(summary))
         if not resolved["due"].any():
             print("nothing is due yet: re-run after the dataset has been re-scraped past the due dates")
         return
