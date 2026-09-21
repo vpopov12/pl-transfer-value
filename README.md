@@ -45,7 +45,17 @@ derivation or metrics. The cache is off by default, so tests never write to disk
 
 ## Checking for new data
 
-Notebook 02's forward predictions only become a true out-of-sample test once the
+> **Upstream updates are paused (checked 21 September 2026).** The project that builds
+> the dataset, [dcaribou/transfermarkt-datasets](https://github.com/dcaribou/transfermarkt-datasets),
+> stopped collecting in mid-July 2026: its scraper can no longer reach the source pages
+> from GitHub Actions, and the maintainer has
+> [announced](https://github.com/dcaribou/transfermarkt-datasets/discussions/383) there
+> is no date for a restart. Valuations end on 12 June 2026, appearances on 28 June and
+> games on 6 July. Kaggle version 679 is that final build. Until collection resumes, the
+> frozen forecasts can't be scored; the weekly data check keeps watching and opens an
+> issue the moment a newer version appears.
+
+The frozen forward predictions only become a true out-of-sample test once the
 upstream Kaggle dataset is re-scraped with valuations dated after the panel's
 last snapshot. To check (and optionally force a re-download):
 

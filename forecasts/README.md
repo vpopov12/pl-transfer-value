@@ -14,9 +14,8 @@ result means after seeing it.
 `forward_2026-06-03_data679.csv` holds 2,801 predictions made from data running up to
 3 June 2026: every Premier League player's latest valuation as of that date, predicted
 3, 6, 9 and 12 months ahead by the default XGBoost model, with a 10th-90th percentile
-band. The file can't be
-revised: `src/forecast.py` refuses to overwrite it, and since its first outcomes were
-due on 6 July 2026 it refuses even with `--force`.
+band. The file can't be revised: `src/forecast.py` refuses to overwrite it, and since
+its first outcomes were due on 6 July 2026 it refuses even with `--force`.
 
 Outcomes are matched exactly as in the backtest: the nearest Transfermarkt valuation,
 in any league, within the horizon's tolerance window of the target date.
@@ -81,3 +80,17 @@ and they won't be excluded to flatter it:
 Each new dataset version gets its own frozen file (`uv run python -m src.forecast`),
 judged by these same rules unless this file is changed first, in a separate commit
 made before that file's first outcome is due.
+
+## Status
+
+*Added 21 September 2026. This section records events; it does not change any rule
+above.*
+
+No outcome has been scored yet, and none can be for now. The upstream project that
+builds the dataset paused collection in mid-July 2026 and has
+[announced](https://github.com/dcaribou/transfermarkt-datasets/discussions/383) no date
+for a restart, so the last published valuation is still 12 June 2026, before any of
+these forecasts' target dates. If collection resumes, the forecasts will be scored under
+the rules above exactly as written. If it never resumes, that will be reported too: the
+forecast was frozen and could not be tested, which is different from passing or failing.
+
