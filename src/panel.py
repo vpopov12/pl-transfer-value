@@ -353,7 +353,16 @@ def add_contract_context(snapshots: pd.DataFrame, players: pd.DataFrame) -> pd.D
     is the contract as of the scrape, not as of the snapshot date, and using it as a
     training feature would leak the future (extensions granted after the snapshot).
     It is meaningful for the latest snapshot per player, which is where notebook 02
-    shows it."""
+    shows it.
+
+    A leak-free history does exist in principle: Kaggle keeps every dataset version and
+    serves old files without a login, so a snapshot could take the contract recorded in
+    the last version published before it. But the contract column only appears from
+    version 192, whose latest valuation is 11 November 2022. Checked on 21 September
+    2026, that leaves two of the 17 twelve-month backtest cutoffs with any training row
+    carrying contract history (4% at most), and six of eleven three-month cutoffs (26%
+    at most): too little to learn the feature or to test it to notebook 07's standard.
+    With upstream collection paused, the history isn't growing either."""
     snapshots = snapshots.copy()
     contracts = players[["player_id", "contract_expiration_date"]].copy()
     contracts["contract_expiration_date"] = pd.to_datetime(

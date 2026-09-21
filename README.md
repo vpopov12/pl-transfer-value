@@ -87,6 +87,18 @@ seen: see [`forecasts/README.md`](forecasts/README.md). The weekly data-check wo
 opens a GitHub issue the first time a new dataset version gives any frozen prediction
 a real outcome.
 
+## Limits of the data
+
+- **Contract expiry is shown, never used as a feature.** The dataset stores only each
+  player's *current* contract, so using it on a past snapshot would leak later
+  extensions. Old Kaggle versions do preserve earlier contracts, but the contract
+  column only exists from November 2022. That gives a 12-month walk-forward test
+  contract history at 2 of 17 cutoffs (4% of training rows at most) and a 3-month test
+  at 6 of 11 (26% at most), too little to learn from or to test fairly.
+- **Market-wide shocks can't be predicted from valuations alone.** Anticipating
+  something like the 2020 markdown would need outside data, such as broadcast revenue
+  or league-wide transfer spending.
+
 ## When new data lands
 
 The weekly data-check workflow opens an issue when a new dataset version gives any
