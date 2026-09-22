@@ -99,6 +99,23 @@ a real outcome.
   something like the 2020 markdown would need outside data, such as broadcast revenue
   or league-wide transfer spending.
 
+## Keeping the weekly check running
+
+GitHub switches off scheduled workflows in a public repository after 60 days without
+any commits, to avoid runs nobody needs. If this repository goes quiet, the weekly data
+check will stop on its own, and GitHub's rule is respected here rather than worked
+around. To switch it back on, or to run it once by hand:
+
+```
+gh workflow enable data-check.yml
+gh workflow run data-check.yml
+```
+
+The alert that doesn't depend on this repository at all: subscribe to the upstream
+maintainer's [status announcement](https://github.com/dcaribou/transfermarkt-datasets/discussions/383).
+If collection resumes, that thread is where it will be announced, and then the steps
+below apply.
+
 ## When new data lands
 
 The weekly data-check workflow opens an issue when a new dataset version gives any
