@@ -1,6 +1,6 @@
 [project]
 name = "pl-transfer-value"
-version = "0.1.0"
+version = "1.0.0"
 description = "Predict Premier League player transfer market value and value growth from performance and age."
 readme = "README.md"
 requires-python = ">=3.13"
